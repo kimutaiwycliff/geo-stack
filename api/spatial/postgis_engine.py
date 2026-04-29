@@ -39,6 +39,10 @@ async def init_postgis_pool() -> None:
         max_size=settings.db_pool_size,
         command_timeout=30,
         init=_init_connection,
+        # Required when connecting through PgBouncer (e.g. Supabase) in
+        # transaction or statement pool mode — disables asyncpg's prepared
+        # statement cache so it never sends named PREPARE commands.
+        statement_cache_size=0,
     )
     # Verify connectivity
     async with _pool.acquire() as conn:
