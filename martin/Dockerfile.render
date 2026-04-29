@@ -1,12 +1,13 @@
 # Dockerfile for deploying Martin to Render.
 # Render free tier is x86_64 (linux/amd64) — Martin's official image is multi-arch.
-# DATABASE_URL is set as an environment variable in the Render dashboard.
+#
+# DATABASE_URL must use the Supabase SESSION pooler (port 5432), not the
+# transaction pooler (port 6543). See config.yaml for explanation.
 
 FROM ghcr.io/maplibre/martin:latest
 
-# Embed the config at build time. Martin reads DATABASE_URL from the environment.
 COPY config.yaml /config.yaml
 
-EXPOSE 3000
-
-CMD ["--config", "/config.yaml"]
+# Shell form so $PORT (injected by Render) is expanded at runtime.
+# Martin's config.yaml also uses ${PORT:-3000} directly.
+CMD sh -c "martin --config /config.yaml"
