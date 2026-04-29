@@ -12,8 +12,8 @@
 #   Transaction pooler (broken): ...pooler.supabase.com:6543/postgres
 #   Session pooler    (correct): ...pooler.supabase.com:5432/postgres
 
-# $PORT is injected by Render. Defaults to 3000 for local use.
-listen_addresses: "0.0.0.0:${PORT:-3000}"
+# listen_addresses is passed via --listen-addresses CLI flag in Dockerfile.render
+# so $PORT (injected by Render) expands correctly at runtime.
 
 keep_alive: 75
 worker_processes: 1

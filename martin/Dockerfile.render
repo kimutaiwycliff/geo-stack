@@ -2,12 +2,14 @@
 # Render free tier is x86_64 (linux/amd64) — Martin's official image is multi-arch.
 #
 # DATABASE_URL must use the Supabase SESSION pooler (port 5432), not the
-# transaction pooler (port 6543). See config.yaml for explanation.
+# transaction pooler (port 6543). Martin runs prepared statements during
+# schema introspection and hangs on the transaction pooler.
 
 FROM ghcr.io/maplibre/martin:latest
 
 COPY config.yaml /config.yaml
 
-# Shell form so $PORT (injected by Render) is expanded at runtime.
-# Martin's config.yaml also uses ${PORT:-3000} directly.
-CMD sh -c "martin --config /config.yaml"
+# The base image has ENTRYPOINT ["martin"], which makes CMD args go to martin.
+# We clear it so the shell form works and $PORT (set by Render) expands correctly.
+ENTRYPOINT []
+CMD ["sh", "-c", "martin --config /config.yaml --listen-addresses 0.0.0.0:${PORT:-3000}"]
