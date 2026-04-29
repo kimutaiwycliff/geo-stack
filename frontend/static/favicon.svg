@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Rounded blue tile background -->
+  <rect width="32" height="32" rx="7" fill="#1d4ed8"/>
+  <!-- Subtle map grid lines -->
+  <line x1="16" y1="2" x2="16" y2="30" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+  <line x1="2" y1="16" x2="30" y2="16" stroke="rgba(255,255,255,0.12)" stroke-width="1"/>
+  <!-- Location pin (teardrop) -->
+  <path d="M16 5C11.31 5 7.5 8.81 7.5 13.5C7.5 20.25 16 27 16 27C16 27 24.5 20.25 24.5 13.5C24.5 8.81 20.69 5 16 5Z" fill="white"/>
+  <!-- Pin centre hole -->
+  <circle cx="16" cy="13.5" r="3.5" fill="#1d4ed8"/>
+</svg>

@@ -1,0 +1,47 @@
+name: Keep Supabase alive
+
+# Supabase free tier pauses projects after 7 days of inactivity.
+# This workflow runs a PostGIS query twice a week to prevent pausing.
+#
+# Setup:
+#   1. GitHub → Settings → Secrets and variables → Actions → New repository secret
+#   2. Add secret: SUPABASE_DATABASE_URL
+#      Value: your Supabase connection pooler URL (port 6543)
+#      Format: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
+#
+# For multiple Supabase projects (one per client), add more secrets and
+# duplicate the ping step — see commented example at the bottom.
+#
+# Cost: ~2 GitHub Actions minutes/week. Well within the 2,000 min/month free limit.
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'   # Monday 08:00 UTC
+    - cron: '0 8 * * 4'   # Thursday 08:00 UTC
+  workflow_dispatch:        # Manual trigger from GitHub UI → Actions tab
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase database
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
+        run: |
+          sudo apt-get install -y postgresql-client -q
+
+          # Use a PostGIS query — a generic SELECT 1 may not count as "activity"
+          # to Supabase's inactivity detector. ST_Point forces PostGIS to run.
+          psql "$DATABASE_URL" --no-password -c \
+            "SELECT extensions.PostGIS_Version(), NOW() AS pinged_at;"
+
+          echo "Ping successful — project will not be paused"
+
+      # Duplicate this step for each additional Supabase project:
+      # - name: Ping project 2 (client name)
+      #   env:
+      #     DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL_CLIENT2 }}
+      #   run: |
+      #     sudo apt-get install -y postgresql-client -q
+      #     psql "$DATABASE_URL" --no-password -c \
+      #       "SELECT extensions.PostGIS_Version(), NOW() AS pinged_at;"

@@ -1,0 +1,115 @@
+# Mode 3: Production on a Linux VPS (x86_64)
+# All services run together on a single machine behind Caddy (HTTPS auto via Let's Encrypt).
+#
+# Usage (Hetzner CX21 or DigitalOcean Droplet):
+#   docker compose -f docker-compose.yml -f docker-compose.production.yml up -d
+#
+# Requirements before first run:
+#   1. All env vars set in .env (or exported in shell) — especially POSTGRES_PASSWORD, DOMAIN
+#   2. DNS A record for DOMAIN pointing at this server's IP (Caddy needs port 80/443)
+#   3. .env.production never committed to git — created manually on the server
+
+services:
+  # PostGIS with memory cap — 1GB is enough for most city-scale platforms.
+  # Password is mandatory; the :? syntax causes Docker Compose to fail fast if unset.
+  postgis:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in production}
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+
+  # PgBouncer: connection pooler in front of PostGIS.
+  # Prevents connection exhaustion when FastAPI scales up or restarts.
+  # FastAPI connects to pgbouncer:5432, never directly to PostGIS.
+  pgbouncer:
+    image: bitnami/pgbouncer:latest
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      POSTGRESQL_HOST: postgis
+      POSTGRESQL_DATABASE: ${POSTGRES_DB:-geodata}
+      POSTGRESQL_USERNAME: ${POSTGRES_USER:-geouser}
+      POSTGRESQL_PASSWORD: ${POSTGRES_PASSWORD}
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: "100"
+      PGBOUNCER_DEFAULT_POOL_SIZE: "20"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 5432 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # FastAPI in production: no hot reload, info logging, connects via PgBouncer.
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile       # Production multi-stage build
+    environment:
+      ENV: production
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SHOW_DOCS: ${SHOW_DOCS:-false}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geouser}:${POSTGRES_PASSWORD}@pgbouncer:5432/${POSTGRES_DB:-geodata}
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+
+  # Caddy: reverse proxy + automatic HTTPS (Let's Encrypt).
+  # Routes /api → FastAPI, /tiles → Martin, /raster → TiTiler, / → SvelteKit.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - api
+      - martin
+      - titiler
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile.production:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN must be set for production TLS}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL required for Let's Encrypt}
+
+  # SvelteKit in production: Node adapter, served by Caddy.
+  frontend:
+    environment:
+      PUBLIC_API_URL: https://${DOMAIN}/api
+      PUBLIC_MARTIN_URL: https://${DOMAIN}/tiles
+      PUBLIC_TITILER_URL: https://${DOMAIN}/raster
+
+  # Backup job: runs pg_dump and uploads to Cloudflare R2.
+  # Trigger manually: docker compose --profile backup run --rm backup
+  # Set up nightly via cron: 0 2 * * * docker compose --profile backup run --rm backup
+  backup:
+    image: postgres:17-alpine
+    restart: "no"
+    profiles: ["backup"]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      R2_ENDPOINT: ${R2_ENDPOINT}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY}
+      R2_SECRET_KEY: ${R2_SECRET_KEY}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-geo-data}
+      POSTGRES_HOST: postgis
+      POSTGRES_DB: ${POSTGRES_DB:-geodata}
+      POSTGRES_USER: ${POSTGRES_USER:-geouser}
+    volumes:
+      - ./db/backup:/scripts:ro
+    entrypoint: ["/scripts/backup.sh"]
+    depends_on:
+      postgis:
+        condition: service_healthy
+
+volumes:
+  # Caddy stores TLS certificates and ACME state — must persist across restarts.
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,74 @@
+# Mode 2: Zero-cost cloud deployment (Supabase + Render + R2 + Vercel)
+# =====================================================================
+# PostGIS  → Supabase free tier (no Docker)
+# Martin   → Render Web Service (Docker image)
+# FastAPI  → Render Web Service (Docker build)
+# TiTiler  → Render Web Service (public image)
+# Frontend → Vercel (no Docker)
+# Data     → Cloudflare R2 (no Docker)
+#
+# This file is used in two ways:
+#   1. Local integration test against live Supabase:
+#      docker compose -f docker-compose.yml -f docker-compose.cloud.yml up
+#      (tests your cloud config before pushing, no Supabase data yet)
+#
+#   2. As reference for environment variables to set on Render services.
+#      Each service's envVars section matches what Render needs.
+#
+# Prerequisites:
+#   - Copy .env.cloud.example → .env.cloud and fill in values
+#   - Load .env.cloud: set -a; source .env.cloud; set +a
+#
+# See HOSTING.md for full setup walkthrough.
+
+services:
+  # PostGIS is on Supabase — not in Docker for Mode 2.
+  postgis:
+    profiles: ["disabled"]
+
+  # Martin: connects to Supabase via DATABASE_URL.
+  # In production this runs as a Render Web Service (see hosting/render.yaml).
+  # Run it here for local integration testing against Supabase before push.
+  martin:
+    environment:
+      DATABASE_URL: ${SUPABASE_DATABASE_URL}
+    ports:
+      - "3000:3000"
+
+  # FastAPI + DuckDB: GeoJSON, analytics, tile proxy.
+  # In production runs as a Render Web Service.
+  api:
+    environment:
+      ENV: cloud
+      DATABASE_URL: ${SUPABASE_DATABASE_URL}
+      R2_ENDPOINT: ${R2_ENDPOINT}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY}
+      R2_SECRET_KEY: ${R2_SECRET_KEY}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME}
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+    ports:
+      - "8000:8000"
+
+  # TiTiler: reads COGs from R2 via GDAL VSI S3 driver.
+  # In production runs as a Render Web Service (public image, no build).
+  # TiTiler gunicorn binds to port 80 internally — map to 8080 on host.
+  titiler:
+    environment:
+      AWS_ACCESS_KEY_ID: ${R2_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${R2_SECRET_KEY}
+      AWS_S3_ENDPOINT: ${R2_ENDPOINT}
+    ports:
+      - "8080:80"
+
+  # SvelteKit frontend: runs locally only for integration testing.
+  # In production Vercel auto-deploys on git push — no Docker needed.
+  frontend:
+    environment:
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      PUBLIC_MARTIN_URL: ${PUBLIC_MARTIN_URL:-http://localhost:3000}
+      PUBLIC_TITILER_URL: ${PUBLIC_TITILER_URL:-http://localhost:8080}
+      PUBLIC_R2_URL: ${R2_PUBLIC_URL}
+      NODE_ENV: production
+    ports:
+      - "5173:3001"

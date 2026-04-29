@@ -1,0 +1,75 @@
+name: Deploy to production
+
+on:
+  push:
+    branches: [main]
+
+# Only run one deploy at a time
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy via SSH
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          timeout: 120s
+          script: |
+            set -euo pipefail
+            cd /opt/geo-stack
+
+            echo "=== Pulling latest code ==="
+            git pull origin main
+
+            echo "=== Pulling updated images ==="
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.production.yml \
+              pull --quiet
+
+            echo "=== Restarting services ==="
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.production.yml \
+              up -d \
+              --no-deps \
+              --build api frontend \
+              --remove-orphans
+
+            echo "=== Waiting for API health check ==="
+            for i in $(seq 1 12); do
+              if curl -sf http://localhost:8000/health > /dev/null; then
+                echo "API is healthy"
+                break
+              fi
+              echo "Waiting... (${i}/12)"
+              sleep 5
+            done
+
+            echo "=== Verifying DuckDB spatial engine ==="
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.production.yml \
+              exec -T api \
+              python -c "
+            import asyncio
+            from spatial.duckdb_engine import verify
+            ok = asyncio.run(verify())
+            print('DuckDB OK:', ok)
+            assert ok, 'DuckDB verification failed'
+            "
+
+            echo "=== Deploy complete ==="
+            docker compose \
+              -f docker-compose.yml \
+              -f docker-compose.production.yml \
+              ps

@@ -1,0 +1,66 @@
+# Mode 1: Local development on Apple M1 (arm64)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.local.yml up
+#
+# Key differences from base:
+#   - FastAPI runs with watchfiles hot-reload
+#   - SvelteKit runs with Vite dev server (HMR)
+#   - Ports exposed directly to localhost (no Caddy)
+#   - PostGIS port exposed for QGIS/DBeaver/psql direct connection
+#
+# Platform notes:
+#   - postgis:17-3.5, martin, and titiler only publish linux/amd64 images.
+#     Docker Desktop on M1 runs them via Rosetta 2 — transparent and fast enough for dev.
+#   - api and frontend build from python:3.12-slim / node:22-alpine which are native arm64.
+
+services:
+  postgis:
+    platform: linux/amd64   # postgis:17-3.5 has no arm64 image yet — Rosetta on M1
+    ports:
+      - "5432:5432"          # Connect with QGIS, DBeaver, or psql directly
+
+  martin:
+    platform: linux/amd64   # Martin only publishes amd64 — Rosetta on M1
+    ports:
+      - "3000:3000"
+
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.dev    # Adds watchfiles for hot reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./api:/app                  # Mounted for hot reload — changes take effect immediately
+      - ./data:/data:ro
+    environment:
+      ENV: local
+      LOG_LEVEL: debug
+      SHOW_DOCS: "true"
+      DB_POOL_SIZE: "5"
+
+  titiler:
+    platform: linux/amd64   # TiTiler only publishes amd64 — Rosetta on M1
+    ports:
+      - "8080:80"   # TiTiler gunicorn binds to port 80 inside the container
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev    # Vite dev server with HMR
+    ports:
+      - "5173:5173"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ./frontend/src:/app/src     # Mounted for HMR — edit and see changes instantly
+      - ./frontend/static:/app/static
+    environment:
+      NODE_ENV: development
+      PUBLIC_API_URL: http://localhost:8000
+      PUBLIC_MARTIN_URL: http://localhost:3000
+      PUBLIC_TITILER_URL: http://localhost:8080
+      VITE_API_PROXY_TARGET: http://api:8000   # Docker service name for server-side proxy

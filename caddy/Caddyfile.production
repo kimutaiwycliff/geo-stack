@@ -1,0 +1,69 @@
+# Production Caddyfile — automatic HTTPS via Let's Encrypt.
+# Caddy handles certificate issuance and renewal automatically.
+# Requires: DOMAIN and ACME_EMAIL env vars set before `docker compose up`.
+#
+# All paths reachable at https://{DOMAIN}/:
+#   /          → SvelteKit SSR
+#   /api/*     → FastAPI (strip /api prefix)
+#   /tiles/*   → Martin MVT tiles (strip /tiles prefix)
+#   /raster/*  → TiTiler COG tiles (strip /raster prefix)
+
+{env.DOMAIN} {
+    tls {env.ACME_EMAIL}
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data: blob: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https:; worker-src blob:;"
+        -Server
+    }
+
+    # FastAPI — strip /api prefix before forwarding
+    handle /api/* {
+        uri strip_prefix /api
+        reverse_proxy api:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Martin vector tiles — aggressive caching (tiles are immutable for a given zoom/coords)
+    handle /tiles/* {
+        uri strip_prefix /tiles
+        reverse_proxy martin:3000
+        header Cache-Control "public, max-age=3600, s-maxage=86400"
+    }
+
+    # TiTiler raster tiles
+    handle /raster/* {
+        uri strip_prefix /raster
+        reverse_proxy titiler:8080
+        header Cache-Control "public, max-age=3600"
+    }
+
+    # SvelteKit — catch-all
+    handle {
+        reverse_proxy frontend:3001
+    }
+
+    # Compress responses
+    encode gzip zstd
+
+    log {
+        output file /var/log/caddy/access.log {
+            roll_size 50mb
+            roll_keep 5
+        }
+        format json
+        level INFO
+    }
+}
+
+# Redirect www to apex
+www.{env.DOMAIN} {
+    redir https://{env.DOMAIN}{uri} permanent
+}

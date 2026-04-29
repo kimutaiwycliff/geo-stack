@@ -1,0 +1,95 @@
+# render.yaml — Render Blueprint (Infrastructure as Code)
+# =========================================================
+# Deploys Martin + FastAPI + TiTiler as Render Web Services.
+#
+# Deploy:
+#   1. Push this repo to GitHub
+#   2. Render Dashboard → New → Blueprint → connect repo
+#   3. Set DATABASE_URL and R2_* secrets via Render dashboard
+#      (marked sync: false below — Render will prompt for these)
+#
+# Free tier limits per service:
+#   - 512 MB RAM
+#   - Spins down after 15 min inactivity (first request takes ~3-5s to wake)
+#   - 500 CPU-hours/month (shared across all free services)
+#
+# Documentation: https://render.com/docs/blueprint-spec
+
+services:
+  # --- Martin: live vector tile server ---
+  # Reads PostGIS tables from Supabase and serves MVT tiles.
+  # DATABASE_URL must point to the Supabase connection pooler (port 6543).
+  - type: web
+    name: geo-martin
+    runtime: docker
+    dockerfilePath: ./martin/Dockerfile.render
+    dockerContext: ./martin
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # Set manually: Supabase pooler URL (port 6543)
+
+  # --- FastAPI: GeoJSON / analytics / tile proxy ---
+  # Serves GeoJSON from PostGIS, analytics from DuckDB+GeoParquet on R2,
+  # and proxies Martin/TiTiler requests with auth headers stripped.
+  - type: web
+    name: geo-api
+    runtime: docker
+    dockerfilePath: ./api/Dockerfile
+    dockerContext: ./api
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false   # Set manually: Supabase pooler URL (port 6543)
+      - key: ENV
+        value: cloud
+      - key: LOG_LEVEL
+        value: info
+      - key: SHOW_DOCS
+        value: "false"   # Disable Swagger UI in production
+      - key: DB_POOL_SIZE
+        value: "3"       # Keep low — Supabase free tier limits connections
+      - key: DUCKDB_THREADS
+        value: "2"
+      - key: DUCKDB_MEMORY
+        value: 256MB
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_ACCESS_KEY
+        sync: false
+      - key: R2_SECRET_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false   # Set to your Vercel frontend URL
+
+  # --- TiTiler: raster tile server for Cloud-Optimized GeoTIFFs ---
+  # Uses the pre-built public image — no Dockerfile needed.
+  # Reads COGs from R2 via GDAL's VSI S3 driver using R2 credentials.
+  - type: web
+    name: geo-titiler
+    runtime: image
+    image:
+      url: ghcr.io/developmentseed/titiler:latest
+    plan: free
+    healthCheckPath: /healthz
+    envVars:
+      - key: AWS_ACCESS_KEY_ID
+        sync: false   # R2 access key
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false   # R2 secret key
+      - key: AWS_S3_ENDPOINT
+        sync: false   # https://<account>.r2.cloudflarestorage.com
+      - key: GDAL_DISABLE_READDIR_ON_OPEN
+        value: EMPTY_DIR
+      - key: VSI_CACHE
+        value: "TRUE"
+      - key: VSI_CACHE_SIZE
+        value: "536870912"
+      - key: CPL_VSIL_CURL_ALLOWED_EXTENSIONS
+        value: ".tif,.tiff,.vrt"

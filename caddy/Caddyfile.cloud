@@ -1,0 +1,28 @@
+# Cloud-free mode Caddyfile.
+# In Mode 2 only PostGIS + Martin run on the VPS.
+# This file proxies Martin tiles and is served by Caddy on the VPS.
+# FastAPI + TiTiler are on Render/Railway (configured via RENDER_API_URL env var).
+# SvelteKit is on Vercel (no proxy needed).
+
+:80 {
+    # Martin vector tiles — accessible to browser directly
+    handle /tiles/* {
+        uri strip_prefix /tiles
+        reverse_proxy martin:3000
+        header {
+            Access-Control-Allow-Origin "*"
+            Access-Control-Allow-Methods "GET, OPTIONS"
+            Cache-Control "public, max-age=3600"
+        }
+    }
+
+    # Health check
+    handle /health {
+        respond "ok" 200
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}

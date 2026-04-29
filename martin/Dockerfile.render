@@ -1,0 +1,12 @@
+# Dockerfile for deploying Martin to Render.
+# Render free tier is x86_64 (linux/amd64) — Martin's official image is multi-arch.
+# DATABASE_URL is set as an environment variable in the Render dashboard.
+
+FROM ghcr.io/maplibre/martin:latest
+
+# Embed the config at build time. Martin reads DATABASE_URL from the environment.
+COPY config.yaml /config.yaml
+
+EXPOSE 3000
+
+CMD ["--config", "/config.yaml"]

@@ -1,0 +1,34 @@
+# Local development Caddyfile — no TLS, simple reverse proxy.
+# Not used in docker-compose.local.yml (services expose ports directly),
+# but useful for testing the Caddy config locally before production deploy.
+
+:2015 {
+    # SvelteKit frontend
+    handle /* {
+        reverse_proxy frontend:3001
+    }
+
+    # FastAPI
+    handle /api/* {
+        uri strip_prefix /api
+        reverse_proxy api:8000
+    }
+
+    # Martin vector tiles
+    handle /tiles/* {
+        uri strip_prefix /tiles
+        reverse_proxy martin:3000
+    }
+
+    # TiTiler raster tiles
+    handle /raster/* {
+        uri strip_prefix /raster
+        reverse_proxy titiler:8080
+    }
+
+    log {
+        output stdout
+        format console
+        level INFO
+    }
+}

@@ -1,0 +1,130 @@
+# Base services shared across all modes.
+# Never run this file directly — always use with an override file.
+#
+# Local dev:    docker compose -f docker-compose.yml -f docker-compose.local.yml up
+# Cloud-free:   docker compose -f docker-compose.yml -f docker-compose.cloud.yml up
+# Production:   docker compose -f docker-compose.yml -f docker-compose.production.yml up -d
+#
+# Cloud-free hosting (Mode 2) — see HOSTING.md for full setup:
+#   PostGIS → Supabase · Martin + API + TiTiler → Render · Frontend → Vercel · Data → R2
+
+services:
+  # PostGIS: primary transactional spatial database.
+  # Owns all write operations and KNN-heavy relational queries.
+  # DuckDB reads GeoParquet directly and never touches this for analytics.
+  postgis:
+    image: postgis/postgis:17-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-geodata}
+      POSTGRES_USER: ${POSTGRES_USER:-geouser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-geouser} -d ${POSTGRES_DB:-geodata}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Martin: Rust vector tile server. Reads directly from PostGIS and generates
+  # Mapbox Vector Tiles (MVT) on the fly. Zero-copy, extremely fast.
+  martin:
+    image: ghcr.io/maplibre/martin:latest
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geouser}:${POSTGRES_PASSWORD}@postgis:5432/${POSTGRES_DB:-geodata}
+    volumes:
+      - ./martin/config.yaml:/config.yaml:ro
+    command: ["--config", "/config.yaml"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # FastAPI: spatial API layer. Routes GeoJSON from PostGIS, analytics from DuckDB,
+  # proxied tiles from Martin, and a STAC catalog for GeoParquet assets.
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-geouser}:${POSTGRES_PASSWORD}@postgis:5432/${POSTGRES_DB:-geodata}
+      DATA_DIR: /data
+      ENV: ${ENV:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      API_RATE_LIMIT: ${API_RATE_LIMIT:-100}
+      SHOW_DOCS: ${SHOW_DOCS:-true}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-5}
+      MARTIN_URL: http://martin:3000
+      TITILER_URL: http://titiler:8080
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_ACCESS_KEY: ${R2_ACCESS_KEY:-}
+      R2_SECRET_KEY: ${R2_SECRET_KEY:-}
+      R2_BUCKET_NAME: ${R2_BUCKET_NAME:-}
+      R2_PUBLIC_URL: ${R2_PUBLIC_URL:-}
+      DUCKDB_THREADS: ${DUCKDB_THREADS:-4}
+      DUCKDB_MEMORY: ${DUCKDB_MEMORY:-512MB}
+    volumes:
+      - ./data:/data:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # TiTiler: FastAPI-based raster tile server. Reads Cloud-Optimized GeoTIFFs (COGs)
+  # directly from disk or R2/S3 via GDAL's /vsicurl/ driver.
+  titiler:
+    image: ghcr.io/developmentseed/titiler:latest
+    restart: unless-stopped
+    environment:
+      GDAL_CACHEMAX: "512"
+      GDAL_DISABLE_READDIR_ON_OPEN: "EMPTY_DIR"
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "536870912"
+      CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.tiff,.vrt"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # SvelteKit frontend: MapLibre GL JS map with layer control, popups, and legend.
+  # Reads layer config from frontend/src/lib/config/layers.ts — that's the per-project file.
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - api
+    environment:
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      PUBLIC_MARTIN_URL: ${PUBLIC_MARTIN_URL:-http://localhost:3000}
+      PUBLIC_TITILER_URL: ${PUBLIC_TITILER_URL:-http://localhost:8080}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3001/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  # PostGIS data persisted across restarts.
+  pgdata:

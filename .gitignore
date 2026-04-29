@@ -1,0 +1,63 @@
+# Environment files — never commit
+.env
+.env.local
+.env.cloud
+.env.production
+.env.staging
+*.env
+projects/*/.env
+
+# Generated tile files — can be large
+data/pmtiles/*.pmtiles
+
+# Large data files — generate from scripts
+data/*.parquet
+data/sample/*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+
+# Node / SvelteKit
+node_modules/
+frontend/.svelte-kit/
+frontend/build/
+frontend/.vercel/
+frontend/.output/
+.pnpm-store/
+
+# Docker
+*.override.yml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Caddy
+caddy_data/
+caddy_config/
+
+# DB backups — stored in R2, not git
+db/backup/*.sql.gz
+
+# Per-project data and generated files
+projects/*/data/
+projects/*/*.parquet

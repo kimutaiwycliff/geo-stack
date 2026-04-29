@@ -1,0 +1,19 @@
+# Development image: Vite dev server with HMR.
+# Source is mounted at /app/src via docker-compose.local.yml volume.
+# Runs as root for simplicity in dev — production image uses a non-root user.
+
+FROM node:22-alpine
+WORKDIR /app
+
+COPY package.json ./
+RUN npm install
+
+# Copy full source so the image works standalone (host volume mount overrides src/)
+COPY . .
+
+# Generate .svelte-kit/ config files (needed before vite can start)
+RUN npx svelte-kit sync
+
+EXPOSE 5173
+
+CMD ["npm", "run", "dev"]

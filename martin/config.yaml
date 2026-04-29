@@ -1,0 +1,81 @@
+# Martin vector tile server configuration.
+# Documentation: https://maplibre.org/martin/
+#
+# Martin auto-discovers all tables with geometry columns in the 'geo' schema.
+# Tiles are available at: http://localhost:3000/{schema}.{table}/{z}/{x}/{y}
+# Catalog: http://localhost:3000/catalog
+
+listen_addresses: "0.0.0.0:3000"
+
+# Keep-alive and performance settings
+keep_alive: 75
+worker_processes: 1   # Increase to match vCPU count in production
+
+postgres:
+  # Connection string inherited from DATABASE_URL environment variable
+  connection_string: ${DATABASE_URL}
+  max_connections: 5
+
+  # Auto-publish all geometry tables in the 'geo' schema.
+  # Tables are available as: geo.<table_name>
+  auto_publish:
+    tables:
+      schemas:
+        - geo          # Only expose validated production data, not staging or audit
+      source_id_format: "{schema}.{table}"
+    functions: false   # Enable if you add custom MVT-generating functions
+
+# Explicit table source overrides.
+# Use these to customise tile properties, zoom ranges, or add attribute filters.
+# Extend this section for each new project layer.
+table_sources:
+  # geo.parcels: land parcel polygons
+  # Recommended zoom range: 12-18 (individual parcel level)
+  geo.parcels:
+    schema: geo
+    table: parcels
+    srid: 4326
+    geometry_column: geom
+    id_column: id
+    minzoom: 12
+    maxzoom: 18
+    # Expose these columns as tile attributes (available in MapLibre feature properties)
+    properties:
+      - parcel_number
+      - owner_name
+      - area_ha
+      - land_use
+      - tenure_type
+
+  # geo.boundaries: administrative boundaries from country to ward level
+  # Recommended zoom range: 0-14 (useful at every level)
+  geo.boundaries:
+    schema: geo
+    table: boundaries
+    srid: 4326
+    geometry_column: geom
+    id_column: id
+    minzoom: 0
+    maxzoom: 14
+    properties:
+      - name
+      - level
+      - code
+      - country
+
+  # geo.points_of_interest: named locations (schools, clinics, etc.)
+  # Recommended zoom range: 10-18 (city to street level)
+  geo.points_of_interest:
+    schema: geo
+    table: points_of_interest
+    srid: 4326
+    geometry_column: geom
+    id_column: id
+    minzoom: 10
+    maxzoom: 18
+    properties:
+      - name
+      - category
+      - subcategory
+      - source
+      - properties
