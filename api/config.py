@@ -31,8 +31,15 @@ class Settings(BaseSettings):
     r2_endpoint: str = ""
     r2_access_key: str = ""
     r2_secret_key: str = ""
-    r2_bucket_name: str = "geo-data"
+    r2_bucket_name: str = "geo-data"   # legacy — kept for backwards compat
+    r2_pmtiles_bucket: str = "geo-pmtiles"
+    r2_parquet_bucket: str = "geo-parquet"
+    r2_uploads_bucket: str = "geo-uploads"
     r2_public_url: str = ""
+
+    # Direct Supabase connection (port 5432) for ogr2ogr bulk-load.
+    # The main DATABASE_URL uses the pooler (port 6543) which doesn't support COPY.
+    supabase_direct_url: str = ""
 
     # DuckDB tuning
     duckdb_threads: int = Field(default=4, ge=1)

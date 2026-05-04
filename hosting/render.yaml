@@ -65,8 +65,16 @@ services:
         sync: false
       - key: R2_BUCKET_NAME
         sync: false
+      - key: R2_PMTILES_BUCKET
+        value: geo-pmtiles
+      - key: R2_PARQUET_BUCKET
+        value: geo-parquet
+      - key: R2_UPLOADS_BUCKET
+        value: geo-uploads
       - key: R2_PUBLIC_URL
         sync: false
+      - key: SUPABASE_DIRECT_URL
+        sync: false   # Direct connection port 5432 for ogr2ogr COPY mode
       - key: CORS_ORIGINS
         sync: false   # Set to your Vercel frontend URL
 

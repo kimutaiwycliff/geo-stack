@@ -18,10 +18,10 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 FROM python:3.12-slim AS runtime
 WORKDIR /app
 
-# Runtime system deps only
+# Runtime system deps: libpq for asyncpg, gdal-bin for ogr2ogr/ogrinfo (server-side ingest)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
-    wget \
+    gdal-bin \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy installed packages from builder
