@@ -34,5 +34,15 @@ COPY . .
 RUN useradd -m -u 1001 geoapi && chown -R geoapi:geoapi /app
 USER geoapi
 
+# Pre-install DuckDB extensions at build time so startup has no network dependency.
+# Extensions land in /home/geoapi/.duckdb/extensions/ and are baked into the image.
+RUN python -c "\
+import duckdb; \
+c = duckdb.connect(':memory:'); \
+c.execute('INSTALL spatial'); \
+c.execute('INSTALL httpfs'); \
+c.close() \
+"
+
 EXPOSE 8000
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

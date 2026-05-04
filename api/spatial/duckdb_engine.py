@@ -30,8 +30,12 @@ SLOW_QUERY_THRESHOLD_S = 1.0
 def _build_init_sql() -> list[str]:
     """Return SQL statements to run on every new DuckDB connection."""
     statements = [
-        "INSTALL spatial; LOAD spatial;",
-        "INSTALL httpfs; LOAD httpfs;",
+        # Extensions are pre-installed in the Docker image (Dockerfile RUN step).
+        # INSTALL is kept as a no-op fallback for local dev outside Docker.
+        "INSTALL spatial;",
+        "LOAD spatial;",
+        "INSTALL httpfs;",
+        "LOAD httpfs;",
         f"SET threads = {settings.duckdb_threads};",
         f"SET memory_limit = '{settings.duckdb_memory}';",
     ]
