@@ -13,17 +13,30 @@ Browser
   │
   ├─→ Vercel            SvelteKit frontend (auto-deploy on git push)
   │     │
-  │     ├─→ Render       FastAPI /features, /analytics, /stac
-  │     │     └─→ Supabase  PostGIS (asyncpg pool, pooler port 6543)
-  │     │     └─→ R2        DuckDB reads GeoParquet via httpfs
+  │     ├─→ Render       FastAPI /features, /analytics, /stac, /ingest
+  │     │     ├─→ Supabase  PostGIS writes (asyncpg, pooler port 6543)
+  │     │     ├─→ Supabase  ogr2ogr bulk-load (direct port 5432, COPY mode)
+  │     │     └─→ R2        DuckDB reads geo-parquet via httpfs
   │     │
-  │     ├─→ Render       Martin MVT tiles (/geo/boundaries/{z}/{x}/{y})
-  │     │     └─→ Supabase  PostGIS (direct read, geo schema only)
+  │     ├─→ Render       Martin MVT tiles (/geo/<table>/{z}/{x}/{y})
+  │     │     └─→ Supabase  PostGIS (session pooler port 5432, geo schema only)
   │     │
   │     ├─→ Render       TiTiler raster tiles
-  │     │     └─→ R2        COG files via GDAL VSI S3
+  │     │     └─→ R2 geo-pmtiles  COG files via GDAL VSI S3
   │     │
-  │     └─→ R2           PMTiles (browser fetches directly, no server)
+  │     └─→ R2 geo-pmtiles   PMTiles (browser range-requests, no server)
+
+Upload flow (any file size, any GDAL format):
+  Browser → stream raw file → Render (FastAPI /ingest/upload)
+                              ├─→ ogrinfo: detect layers
+                              ├─→ R2 geo-uploads: durable backup
+                              └─→ ogr2ogr: direct → Supabase staging
+                                  ↑ progress via SSE (staging.ingest_jobs)
+
+R2 buckets:
+  geo-pmtiles   public   PMTiles + COGs  (browser range requests)
+  geo-parquet   public   GeoParquet      (DuckDB httpfs analytics)
+  geo-uploads   private  Raw uploads     (ogr2ogr staging, auto-cleaned)
 ```
 
 ---
@@ -34,22 +47,40 @@ Do this once. All projects share the same Render services, R2 bucket, and Vercel
 
 ### 1.1 Cloudflare R2
 
-1. Create a Cloudflare account (free, no credit card).
-2. R2 → Create bucket → name: `geo-data` → Location: auto.
-3. Enable public access: R2 → `geo-data` → Settings → Public access → Allow public.
-   This gives you a URL like `https://pub-<hash>.r2.dev`.
-4. Apply CORS config so browsers can load PMTiles and COGs:
+**Why R2?** 10 GB free storage, 10 M reads/month, 1 M writes/month, and **zero egress fees**
+(unlike AWS S3 which charges per GB downloaded). PMTiles and GeoParquet both rely on HTTP range
+requests — no egress cost makes R2 the natural fit.
+
+1. Create a Cloudflare account (free, no credit card needed).
+
+2. Create **three buckets** (R2 → Create bucket):
+
+   | Bucket | Location | Purpose |
+   |--------|----------|---------|
+   | `geo-pmtiles` | auto | PMTiles + COG rasters — **public** |
+   | `geo-parquet` | auto | GeoParquet for DuckDB analytics — **public** |
+   | `geo-uploads` | auto | Raw file uploads for server-side ingest — **private** |
+
+3. Enable public access on `geo-pmtiles` and `geo-parquet`:
+   R2 → bucket → Settings → Public access → Allow public.
+   Each gives you a URL like `https://pub-<hash>.r2.dev`.
+   Note both URLs — you will use the `geo-pmtiles` URL as `R2_PUBLIC_URL`.
+   Leave `geo-uploads` **private** (no public access).
+
+4. Apply CORS to `geo-pmtiles` so browsers can load PMTiles and COGs via range requests:
    ```bash
    npm install -g wrangler
    wrangler login
-   wrangler r2 bucket cors put geo-data --file hosting/r2_cors.json
+   wrangler r2 bucket cors put geo-pmtiles --file hosting/r2_cors.json
    ```
-   The `Range` header in the CORS config is critical — PMTiles and COG both rely on
-   HTTP range requests to fetch only the tile/chunk they need.
-5. Create an API token: R2 → Manage R2 API Tokens → Create API Token.
-   - Permissions: Object Read & Write
-   - Scope: `geo-data` bucket only
-   - Copy `Access Key ID` and `Secret Access Key` — you need these for `.env.cloud`.
+   The `Range` header in the CORS config is critical — both PMTiles and COG rely on
+   HTTP range requests to fetch only the tile or chunk they need.
+
+5. Create an API token (one token covers all three buckets):
+   R2 → Manage R2 API Tokens → Create API Token.
+   - Permissions: **Object Read & Write**
+   - Scope: all three buckets (`geo-pmtiles`, `geo-parquet`, `geo-uploads`)
+   - Copy `Access Key ID` and `Secret Access Key` — needed for `.env.cloud` and Render.
 
 ### 1.2 Render
 
@@ -69,12 +100,15 @@ Do this once. All projects share the same Render services, R2 bucket, and Vercel
    **geo-api**:
    | Variable | Value |
    |---------|-------|
-   | `DATABASE_URL` | Supabase pooler URL (port 6543) |
+   | `DATABASE_URL` | Supabase **transaction** pooler URL (port **6543**) — for asyncpg |
+   | `SUPABASE_DIRECT_URL` | Supabase **direct** URL (port **5432**) — for ogr2ogr COPY mode. Dashboard → Project Settings → Database → Connection string → URI (direct). Format: `postgresql://postgres:PASS@db.XXXX.supabase.co:5432/postgres` |
    | `R2_ENDPOINT` | `https://<account_id>.r2.cloudflarestorage.com` |
    | `R2_ACCESS_KEY` | Your R2 access key |
    | `R2_SECRET_KEY` | Your R2 secret key |
-   | `R2_BUCKET_NAME` | `geo-data` |
-   | `R2_PUBLIC_URL` | `https://pub-<hash>.r2.dev` |
+   | `R2_PMTILES_BUCKET` | `geo-pmtiles` |
+   | `R2_PARQUET_BUCKET` | `geo-parquet` |
+   | `R2_UPLOADS_BUCKET` | `geo-uploads` |
+   | `R2_PUBLIC_URL` | Public URL of `geo-pmtiles` bucket (`https://pub-<hash>.r2.dev`) |
    | `CORS_ORIGINS` | Your Vercel frontend URL |
 
    **geo-titiler**:
@@ -150,22 +184,37 @@ This creates `projects/<name>/` with SQL files, a `.env` stub, and a layer confi
 
 ### 2.3 Data in R2
 
-GeoParquet and PMTiles go in a project subfolder of the `geo-data` bucket:
+Three dedicated buckets keep tile types separate and access controls clean:
+
 ```
-geo-data/
+geo-pmtiles/           ← public, browser range-requests
   <project-name>/
     boundaries.pmtiles
-    my_layer.parquet
-  another-project/
-    ...
+    roads.pmtiles
+    imagery.tif        ← COG rasters for TiTiler
+
+geo-parquet/           ← public (read), credentials needed to write
+  <project-name>/
+    boundaries.parquet
+    buildings.parquet  ← DuckDB reads via httpfs (range requests)
+
+geo-uploads/           ← private, managed by the API
+  <job-uuid>/
+    raw_file.zip       ← deleted automatically after ogr2ogr finishes
 ```
 
-Load env vars first, then sync:
+Sync local files to R2 (load env vars first):
 ```bash
-source projects/<name>/.env
-./scripts/r2_sync.sh data/pmtiles/<name>/ pmtiles/<name>/
-./scripts/r2_sync.sh projects/<name>/data/ <name>/
+source .env.cloud
+
+# PMTiles
+./scripts/r2_sync.sh data/pmtiles/<name>/ geo-pmtiles/<name>/
+
+# GeoParquet
+./scripts/r2_sync.sh data/parquet/<name>/ geo-parquet/<name>/
 ```
+
+The `geo-uploads` bucket is managed entirely by the API — you never write to it directly.
 
 ### 2.4 GitHub Secrets (keep-alive)
 
@@ -179,78 +228,117 @@ source projects/<name>/.env
 
 ## Section 3 — Loading data
 
-There are two ways to get data into the stack: **the browser upload app** (GeoJSON, KML,
-Shapefile ZIP, CSV up to 100,000 features) and **the CLI loader** (any GDAL-supported format,
-any size, direct to Supabase). Both land data in `staging.raw_features` or a custom staging
-table. Production data lives in the `geo` schema, which Martin serves as MVT tiles.
+There are three ways to load data, suited to different file sizes and workflows:
+
+| Method | Best for | Size limit | Where data lands |
+|--------|----------|-----------|-----------------|
+| **Web UI** (`/upload`) | Any GDAL format, any size, interactive | No limit | custom `staging.*` table |
+| **CLI script** (`load_supabase.sh`) | Local large files, automation | No limit | custom `staging.*` table |
+| **API endpoint** (`/ingest/features`) | Programmatic GeoJSON POST | 100k features | `staging.raw_features` |
+
+All three routes land in the `staging` schema. Promote to `geo` when data is validated (§3.3).
 
 ---
 
-### 3.1 Browser upload (UI mini-app)
+### 3.1 Web upload UI — `/upload`
 
 Navigate to `https://your-vercel-url/upload` (or `http://localhost:5173/upload` locally).
+The "Upload Data" link also appears at the bottom of the map's Layer Control panel.
 
-**Supported formats:**
-| Format | Max size | Notes |
-|--------|----------|-------|
-| GeoJSON (`.geojson`, `.json`) | 100k features | FeatureCollection, Feature, or bare geometry |
-| KML (`.kml`) | 100k features | Parsed with `@mapbox/togeojson` |
-| Shapefile ZIP (`.zip`) | 100k features | ZIP must contain `.shp`, `.dbf`, `.prj` |
-| CSV (`.csv`) | 100k features | Must have `lat`/`lon` or `latitude`/`longitude` columns |
+**How it works — server-side GDAL, no browser memory limit:**
+
+The browser streams the raw file to the API. The API saves it to disk, runs `ogrinfo` to
+detect layers, backs it up to R2 `geo-uploads`, then runs `ogr2ogr` server-side to load
+directly into Supabase via the direct connection (COPY mode). Progress is tracked in
+`staging.ingest_jobs` and streamed back to the browser via SSE.
+
+```
+Browser → stream file bytes → Render API → /tmp
+                                           ├─ ogrinfo: layer list (returned to browser)
+                                           ├─ R2 geo-uploads: durable backup
+                                           └─ ogr2ogr → Supabase staging.* (direct port 5432)
+                                                        ↑ progress SSE (1s polling of ingest_jobs)
+```
+
+**Supported formats — anything ogr2ogr can read:**
+| Format | Extension | Notes |
+|--------|-----------|-------|
+| GeoJSON | `.geojson`, `.json` | Single or multi-layer |
+| KML | `.kml` | Placemarks, polygons, lines |
+| Shapefile ZIP | `.zip` | ZIP with `.shp`/`.dbf`/`.prj`; multi-SHP ZIPs show a layer picker |
+| GeoPackage | `.gpkg` | Multi-layer; layer picker shown |
+| GeoParquet | `.parquet` | Spatial Parquet files |
+| CSV | `.csv` | Must have `lat`/`lon` columns |
+| GML, MapInfo | `.gml`, `.tab` | Any format GDAL supports |
 
 **Workflow:**
-1. Drag-drop or browse for your file.
-2. Review the validation panel — feature count, geometry types, extent, any CRS warnings.
-3. Enter a layer name (auto-suggested from the filename).
-4. Click **Upload** — a progress bar streams from the API as batches of 500 features are inserted.
-5. On completion, the layer appears in the **Staging layers** panel below.
+1. Drag-drop or browse for your file — any size.
+2. The file streams to the server with a live upload progress bar (%).
+3. After upload, the server runs `ogrinfo` and shows detected layers.
+   - Single-layer files (GeoJSON, KML): layer is auto-selected.
+   - Multi-layer files (GeoPackage, Shapefile ZIP): a radio list lets you pick one layer.
+4. Set the **target table** (e.g. `staging.kenya_roads`) — auto-suggested from the filename.
+   Tick **Overwrite** if you want to replace an existing table.
+5. Click **Import** — the server runs `ogr2ogr` and streams progress back.
+6. When done, a success panel shows the row count and next-step SQL snippets.
+7. **Job history** panel on the right lists all past jobs with status, row count, and errors.
+   You can close the tab mid-import — the job continues server-side. Come back and check history.
 
-All uploads land in `staging.raw_features` with columns:
-`id · source · layer_name · properties (JSONB) · geom (geometry, EPSG:4326) · imported_at`
+**What the server does automatically:**
+- Reprojects to EPSG:4326
+- Promotes to multi-geometry (no Polygon/MultiPolygon type mismatches)
+- Appends `sslmode=require` to the Supabase connection string
+- Uses PostgreSQL COPY mode (fastest bulk insert) when `SUPABASE_DIRECT_URL` is set
+- Backs up the raw file to R2 `geo-uploads` so the job can be retried if the API restarts
+- Cleans up `/tmp` after the job completes
 
-To use the data, promote it to the `geo` schema (see §3.3).
+**API endpoints behind the UI:**
+```
+POST /ingest/upload          — upload file, detect layers → {job_id, layers[]}
+POST /ingest/process         — start ogr2ogr job          → {job_id, status}
+GET  /ingest/job/{id}        — SSE progress stream
+GET  /ingest/jobs            — list last 50 jobs
+DELETE /ingest/job/{id}      — delete job record + R2 backup
+```
 
 ---
 
 ### 3.2 CLI loader — `scripts/load_supabase.sh`
 
-For large files, GeoPackage, GeoParquet, or any format GDAL can read. Loads directly
-into Supabase via `ogr2ogr` COPY mode — much faster than row-by-row inserts.
+Use this when running from your local machine for very large datasets (> Render free RAM),
+automation scripts, or when you want to load directly without the UI.
 
 **Prerequisites:**
 - `ogr2ogr` installed (`brew install gdal` on macOS, `apt install gdal-bin` on Ubuntu)
 - `SUPABASE_DIRECT_URL` set in `.env.cloud` — must be the **direct** connection (port 5432),
-  NOT the pooler. Dashboard → Project Settings → Database → Connection string → URI (direct):
+  not the pooler. Get it from Dashboard → Project Settings → Database → Connection string → URI:
   ```
   postgresql://postgres:PASSWORD@db.XXXX.supabase.co:5432/postgres
   ```
 
-**Basic usage:**
+**Usage:**
 ```bash
-# Shapefile ZIP (auto-extracts; if multiple layers, lists them and loads first)
+# Shapefile ZIP — lists all layers if multiple, loads first one
 ./scripts/load_supabase.sh data/kenya.zip staging.kenya_admin
 
 # Specific layer from a multi-layer ZIP
 ./scripts/load_supabase.sh data/kenya.zip staging.kenya_admin --layer adminareas
 
-# GeoJSON into staging
+# GeoJSON
 ./scripts/load_supabase.sh data/wards.geojson staging.wards
 
-# GeoPackage (specific layer)
+# GeoPackage with specific layer
 ./scripts/load_supabase.sh data/kenya.gpkg staging.roads --layer roads
 
-# Overwrite an existing table
+# Overwrite existing table
 ./scripts/load_supabase.sh data/file.geojson staging.layer --overwrite
 
-# Spatial filter — clip to Nairobi bbox before loading
-./scripts/load_supabase.sh data/roads.shp staging.nairobi_roads --bbox 36.65,-1.36,37.10,-1.16
+# Spatial filter — clip to a bounding box before loading
+./scripts/load_supabase.sh data/roads.zip staging.nairobi_roads \
+  --layer roads_free --bbox 36.65,-1.36,37.10,-1.16
 ```
 
-The script always:
-- Reprojects to EPSG:4326
-- Promotes to multi-geometry (avoids Polygon/MultiPolygon mismatches)
-- Appends SSL (`?sslmode=require`) if not already in the URL
-- Prints a row count and next-step hints on completion
+The script always reprojects to EPSG:4326, promotes to multi-geometry, and uses COPY mode.
 
 ---
 
@@ -380,13 +468,24 @@ or recreate the table with an explicit `GEOMETRY(...)` type.
 
 | Service | Free limit | What breaks first | Upgrade cost |
 |---------|-----------|------------------|-------------|
-| Supabase | 500 MB DB, 2 projects | DB storage at ~50M parcel rows | $25/mo (Pro) |
-| Cloudflare R2 | 10 GB storage, 10M GET/mo | Storage at ~10K PMTiles | $0.015/GB after |
-| Render | 512 MB RAM, spins down | OOM on large DuckDB queries | $7/mo per service |
+| Supabase | 500 MB DB, 2 projects | DB storage (~50M rows) | $25/mo (Pro) |
+| Cloudflare R2 | 10 GB storage, 1M writes, 10M reads/mo | Storage if many large PMTiles | $0.015/GB after |
+| Render | 512 MB RAM, spins down after 15 min idle | OOM on large DuckDB queries or huge ogr2ogr jobs | $7/mo per service |
 | Vercel | Unlimited deploys | Rarely a concern | $20/mo (Pro) |
 
-**Rule of thumb**: you can run 2 full projects (PostGIS + GeoParquet + PMTiles) within
-the free limits for most city-scale or country-level GIS datasets.
+**R2 bucket breakdown (10 GB total across all buckets):**
+- `geo-pmtiles`: PMTiles files are typically 5–200 MB each. 10 GB = ~50–2000 layers.
+- `geo-parquet`: GeoParquet with ZSTD compression is very compact. Country-level OSM ≈ 100–500 MB.
+- `geo-uploads`: Temp only — files are deleted after ogr2ogr finishes. Rarely holds > 1 GB at a time.
+
+**Render RAM and ogr2ogr:**
+Render's free tier has 512 MB RAM. `ogr2ogr` with COPY mode is streaming — it doesn't load the
+whole file into memory. In practice, files up to ~500 MB process fine. For the 1.2 GB Kenya
+buildings shapefile, run the CLI script locally instead (your machine has more RAM and ogr2ogr
+writes directly to Supabase over the network).
+
+**Rule of thumb**: 2 full country-level projects (PostGIS + GeoParquet + PMTiles) fit comfortably
+within all free tiers.
 
 ---
 
@@ -414,16 +513,46 @@ If empty, the table's geometry column wasn't created with `AddGeometryColumn()` 
 `CREATE TABLE ... geom GEOMETRY(...)`. Both work — check PostGIS version compatibility.
 
 **PMTiles not loading in browser (CORS error)**
-R2 bucket's CORS config must allow the `Range` header. Re-apply:
+R2 bucket's CORS config must allow the `Range` header. Re-apply to `geo-pmtiles`:
 ```bash
-wrangler r2 bucket cors put geo-data --file hosting/r2_cors.json
+wrangler r2 bucket cors put geo-pmtiles --file hosting/r2_cors.json
 ```
-Also verify public access is enabled on the bucket (R2 → `geo-data` → Settings → Public access).
+Also verify public access is enabled (R2 → `geo-pmtiles` → Settings → Public access).
 
 **DuckDB can't read GeoParquet from R2 ("403 Forbidden")**
-Check `R2_ENDPOINT` format — it must be `https://<account_id>.r2.cloudflarestorage.com`
-with no trailing slash. Also verify the R2 API token has read access on the `geo-data` bucket,
-not account-wide (scope matters on R2 tokens).
+Check `R2_ENDPOINT` format — must be `https://<account_id>.r2.cloudflarestorage.com`
+with no trailing slash. Verify the R2 API token covers the `geo-parquet` bucket and has
+Read & Write permissions. Scope matters — a token scoped to one bucket won't access another.
+
+**Web upload stuck on "Queued — starting…" and never progresses**
+The API background task is running but `staging.ingest_jobs` isn't being updated.
+Check Render logs for `geo-api` — common causes:
+- `SUPABASE_DIRECT_URL` not set: ogr2ogr falls back to the pooler URL which may reject COPY mode.
+  Add `SUPABASE_DIRECT_URL` (port 5432 direct) to the `geo-api` Render service.
+- `ogrinfo`/`ogr2ogr` not found: the Docker image didn't include `gdal-bin`. Trigger a fresh
+  deploy (Render → `geo-api` → Manual Deploy) so the updated Dockerfile is used.
+- File gone from `/tmp`: Render restarts clear `/tmp`. If you see "File no longer available",
+  the job will attempt to restore from R2 `geo-uploads`. If R2 credentials aren't set, re-upload.
+
+**Web upload: "No readable layers found in this file"**
+`ogrinfo` couldn't open the file. Possible causes:
+- Corrupt or incomplete upload (retry).
+- Format not supported by the GDAL version in the Docker image (check Render logs for the
+  ogrinfo error message).
+- ZIP file has no `.shp` inside — the upload page expects Shapefile ZIPs, not arbitrary ZIPs.
+
+**Web upload: ogr2ogr fails with geometry type error**
+ogr2ogr promotes all geometries to multi-type (`-nlt PROMOTE_TO_MULTI`), which handles
+most Polygon/MultiPolygon mix issues. If you still see a type error, check the `error` field
+in the Job history panel — the full ogr2ogr error message is stored there.
+
+**Job shows "done" but table doesn't appear in Supabase**
+The `target_table` might have been created in the wrong schema. Run in SQL Editor:
+```sql
+SELECT schemaname, tablename FROM pg_tables WHERE tablename ILIKE '%your_table%';
+```
+Also check: if `overwrite` was NOT set and the table already existed with different column
+types, ogr2ogr appended to it and the row count includes both old and new rows.
 
 **Render cold start: first request takes 3-5 seconds**
 Free tier services spin down after 15 minutes of inactivity. The first request wakes them.
