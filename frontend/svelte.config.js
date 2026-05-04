@@ -5,11 +5,11 @@ import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
 const config = {
 	preprocess: vitePreprocess(),
 	kit: {
-		// adapter-auto selects the right adapter based on the deployment target:
-		//   Vercel  → @sveltejs/adapter-vercel  (serverless functions)
-		//   Docker  → @sveltejs/adapter-node    (fallback, used locally)
-		// No config needed — Vercel injects VERCEL=1 at build time automatically.
-		adapter: adapter(),
+		adapter: adapter({
+			// adapter-vercel doesn't support Node 24 yet. Pin to Node 20 LTS.
+			// Ignored by adapter-node (local Docker), only used on Vercel.
+			runtime: 'nodejs20.x',
+		}),
 	},
 };
 
