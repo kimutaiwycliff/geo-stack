@@ -19,12 +19,18 @@ keep_alive: 75
 worker_processes: 1
 
 postgres:
-  connection_string: ${DATABASE_URL}
+  # Append search_path options so Martin finds PostGIS functions in Supabase's
+  # 'extensions' schema without depending on ALTER ROLE having been run first.
+  # %20 = space, %3D = =  (standard URI percent-encoding inside query param values)
+  connection_string: "${DATABASE_URL}?options=-c%20search_path%3Dpublic,extensions,geo"
   pool_size: 5
 
-  # Auto-publish all geometry tables in the 'geo' schema.
+  # Auto-publish all geometry tables in the 'geo' schema only.
+  # from_schemas limits discovery (v1.8 key — replaces the old 'schemas' key).
+  # source_id_format must be nested under tables: not at the auto_publish level.
   auto_publish:
-    schemas:
-      - geo          # Only expose validated production data, not staging or audit
-    source_id_format: "{schema}.{table}"
-    functions: false # Enable if you add custom MVT-generating SQL functions
+    from_schemas:
+      - geo
+    tables:
+      source_id_format: "{schema}.{table}"
+    functions: false
