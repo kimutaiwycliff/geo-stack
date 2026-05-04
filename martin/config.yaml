@@ -19,10 +19,10 @@ keep_alive: 75
 worker_processes: 1
 
 postgres:
-  # Append search_path options so Martin finds PostGIS functions in Supabase's
-  # 'extensions' schema without depending on ALTER ROLE having been run first.
-  # %20 = space, %3D = =  (standard URI percent-encoding inside query param values)
-  connection_string: "${DATABASE_URL}?options=-c%20search_path%3Dpublic,extensions,geo"
+  # search_path is set at the DATABASE level via ALTER DATABASE so it applies
+  # to every connection including through Supabase's PgBouncer session pooler.
+  # Martin's Rust postgres driver does not support the ?options= URL parameter.
+  connection_string: "${DATABASE_URL}"
   pool_size: 5
 
   # Auto-publish all geometry tables in the 'geo' schema only.
