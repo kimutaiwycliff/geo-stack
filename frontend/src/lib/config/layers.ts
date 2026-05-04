@@ -166,7 +166,7 @@ export const layers: LayerConfig[] = [
     },
     layout: { 'line-join': 'round', 'line-cap': 'round' },
     minzoom: 2,
-    maxzoom: 14,
+    maxzoom: 23,
     visible: true,
     popupFields: ['country', 'gid_0'],
     bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
