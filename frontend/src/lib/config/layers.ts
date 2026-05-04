@@ -155,10 +155,10 @@ export const layers: LayerConfig[] = [
   // Changes rarely but must be queryable at all zoom levels → MVT is ideal.
   {
     id: 'boundaries',
-    label: 'Admin Boundaries',
+    label: 'Admin',
     type: 'mvt',
-    url: `${MARTIN_URL}/geo.boundaries/{z}/{x}/{y}`,
-    sourceLayer: 'geo.boundaries',
+    url: `${MARTIN_URL}/geo.admin/{z}/{x}/{y}`,
+    sourceLayer: 'geo.admin',
     paint: {
       'line-color': '#374151',
       'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 10, 2],
@@ -167,9 +167,9 @@ export const layers: LayerConfig[] = [
     layout: { 'line-join': 'round', 'line-cap': 'round' },
     minzoom: 2,
     maxzoom: 14,
-    visible: false,
-    popupFields: ['name', 'level', 'code'],
-    bounds: [33.9, -4.7, 41.9, 5.0],   // Kenya extent
+    visible: true,
+    popupFields: ['country', 'gid_0'],
+    bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
   },
 
   // ─── Nairobi wards (PMTiles — static, zero-cost serving from R2) ──────────
