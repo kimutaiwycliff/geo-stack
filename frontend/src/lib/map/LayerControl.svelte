@@ -225,6 +225,14 @@
       <span>Show Legend</span>
     </label>
 
+    <a href="/upload" class="upload-link">
+      <svg viewBox="0 0 14 14" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7 9V3M4 6l3-3 3 3"/>
+        <path d="M2 11h10"/>
+      </svg>
+      Upload Data
+    </a>
+
   {/if}
 </div>
 
@@ -389,6 +397,20 @@
     color: #6b7280;
   }
   .legend-toggle:hover { color: #374151; }
+
+  .upload-link {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 10px;
+    font-size: 12px;
+    color: #2563eb;
+    text-decoration: none;
+    padding: 5px 6px;
+    border-radius: 5px;
+    transition: background 0.15s;
+  }
+  .upload-link:hover { background: #eff6ff; }
 
   /* ── Icon buttons ───────────────────────────────────────────────────────── */
   .icon-btn {

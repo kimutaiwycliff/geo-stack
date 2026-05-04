@@ -22,7 +22,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config import settings
-from routers import analytics, features, health, stac, tiles
+from routers import analytics, features, health, ingest, stac, tiles
 from spatial.duckdb_engine import init_duckdb, shutdown_duckdb
 from spatial.postgis_engine import close_postgis_pool, init_postgis_pool
 
@@ -83,7 +83,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=["GET", "OPTIONS"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -109,3 +109,4 @@ app.include_router(features.router, prefix="/features", tags=["features"])
 app.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 app.include_router(tiles.router, prefix="/tiles", tags=["tiles"])
 app.include_router(stac.router, prefix="/stac", tags=["stac"])
+app.include_router(ingest.router, prefix="/ingest", tags=["ingest"])

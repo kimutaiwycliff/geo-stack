@@ -26,7 +26,10 @@
     "vite": "^5.0.0"
   },
   "dependencies": {
+    "@mapbox/togeojson": "^0.16.2",
     "maplibre-gl": "^4.7.1",
-    "pmtiles": "^3.2.1"
+    "papaparse": "^5.4.1",
+    "pmtiles": "^3.2.1",
+    "shpjs": "^6.1.0"
   }
 }
