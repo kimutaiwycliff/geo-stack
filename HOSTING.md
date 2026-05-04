@@ -177,51 +177,202 @@ source projects/<name>/.env
 
 ---
 
-## Section 3 — Loading data and redeploying Martin
+## Section 3 — Loading data
 
-### Redeploy Martin after adding a new Supabase table
+There are two ways to get data into the stack: **the browser upload app** (GeoJSON, KML,
+Shapefile ZIP, CSV up to 100,000 features) and **the CLI loader** (any GDAL-supported format,
+any size, direct to Supabase). Both land data in `staging.raw_features` or a custom staging
+table. Production data lives in the `geo` schema, which Martin serves as MVT tiles.
 
-Martin (running on Render) discovers PostGIS tables **only when it starts**. After you
-load a new table into Supabase, Martin won't serve it until you trigger a redeploy:
+---
 
-1. Render Dashboard → `geo-martin` → top-right **Manual Deploy** → **Deploy latest commit**
-2. Wait ~30 seconds for the new instance to start.
-3. Verify: `curl https://geo-martin-<hash>.onrender.com/geo.my_table`
+### 3.1 Browser upload (UI mini-app)
 
-Alternatively, update any environment variable on the `geo-martin` service and save —
-Render redeploys automatically on any env change.
+Navigate to `https://your-vercel-url/upload` (or `http://localhost:5173/upload` locally).
 
-### Data loading reference
+**Supported formats:**
+| Format | Max size | Notes |
+|--------|----------|-------|
+| GeoJSON (`.geojson`, `.json`) | 100k features | FeatureCollection, Feature, or bare geometry |
+| KML (`.kml`) | 100k features | Parsed with `@mapbox/togeojson` |
+| Shapefile ZIP (`.zip`) | 100k features | ZIP must contain `.shp`, `.dbf`, `.prj` |
+| CSV (`.csv`) | 100k features | Must have `lat`/`lon` or `latitude`/`longitude` columns |
+
+**Workflow:**
+1. Drag-drop or browse for your file.
+2. Review the validation panel — feature count, geometry types, extent, any CRS warnings.
+3. Enter a layer name (auto-suggested from the filename).
+4. Click **Upload** — a progress bar streams from the API as batches of 500 features are inserted.
+5. On completion, the layer appears in the **Staging layers** panel below.
+
+All uploads land in `staging.raw_features` with columns:
+`id · source · layer_name · properties (JSONB) · geom (geometry, EPSG:4326) · imported_at`
+
+To use the data, promote it to the `geo` schema (see §3.3).
+
+---
+
+### 3.2 CLI loader — `scripts/load_supabase.sh`
+
+For large files, GeoPackage, GeoParquet, or any format GDAL can read. Loads directly
+into Supabase via `ogr2ogr` COPY mode — much faster than row-by-row inserts.
+
+**Prerequisites:**
+- `ogr2ogr` installed (`brew install gdal` on macOS, `apt install gdal-bin` on Ubuntu)
+- `SUPABASE_DIRECT_URL` set in `.env.cloud` — must be the **direct** connection (port 5432),
+  NOT the pooler. Dashboard → Project Settings → Database → Connection string → URI (direct):
+  ```
+  postgresql://postgres:PASSWORD@db.XXXX.supabase.co:5432/postgres
+  ```
+
+**Basic usage:**
+```bash
+# Shapefile ZIP (auto-extracts; if multiple layers, lists them and loads first)
+./scripts/load_supabase.sh data/kenya.zip staging.kenya_admin
+
+# Specific layer from a multi-layer ZIP
+./scripts/load_supabase.sh data/kenya.zip staging.kenya_admin --layer adminareas
+
+# GeoJSON into staging
+./scripts/load_supabase.sh data/wards.geojson staging.wards
+
+# GeoPackage (specific layer)
+./scripts/load_supabase.sh data/kenya.gpkg staging.roads --layer roads
+
+# Overwrite an existing table
+./scripts/load_supabase.sh data/file.geojson staging.layer --overwrite
+
+# Spatial filter — clip to Nairobi bbox before loading
+./scripts/load_supabase.sh data/roads.shp staging.nairobi_roads --bbox 36.65,-1.36,37.10,-1.16
+```
+
+The script always:
+- Reprojects to EPSG:4326
+- Promotes to multi-geometry (avoids Polygon/MultiPolygon mismatches)
+- Appends SSL (`?sslmode=require`) if not already in the URL
+- Prints a row count and next-step hints on completion
+
+---
+
+### 3.3 Staging → Production (`staging` → `geo` schema)
+
+`staging` is the landing zone. `geo` is what Martin serves as tiles and what the API
+exposes. Moving data between them is a SQL step — you decide when data is ready.
+
+**Option A — Copy into an existing `geo` table (recommended for standard layers):**
+```sql
+-- Promote Kenya admin areas into the geo.boundaries table
+INSERT INTO geo.boundaries (name, admin_level, geom)
+SELECT
+    properties->>'name'         AS name,
+    (properties->>'admin_level')::int AS admin_level,
+    geom
+FROM staging.raw_features
+WHERE layer_name = 'kenya_admin'
+  AND ST_IsValid(geom);
+```
+
+**Option B — Create a new table directly in `geo` from a staging table:**
+```sql
+-- Promote a CLI-loaded staging table (e.g. staging.kenya_admin) to geo
+CREATE TABLE geo.kenya_admin AS
+SELECT * FROM staging.kenya_admin;
+
+-- Add a spatial index (Martin needs this)
+CREATE INDEX ON geo.kenya_admin USING GIST (geom);
+
+-- Register the geometry column (required for Martin auto-discovery)
+-- (PostGIS 3.x does this automatically via geometry_columns view,
+--  but run this if Martin doesn't pick up the table)
+SELECT Populate_Geometry_Columns('geo.kenya_admin'::regclass);
+```
+
+**Option C — Rename a CLI-loaded staging table into `geo`:**
+```sql
+ALTER TABLE staging.kenya_admin SET SCHEMA geo;
+CREATE INDEX IF NOT EXISTS kenya_admin_geom_idx ON geo.kenya_admin USING GIST (geom);
+```
+
+**After any of the above — redeploy Martin** so it picks up the new table:
 
 ```bash
-# Any vector format → optimised GeoParquet (Hilbert-sorted, bbox columns)
+# Via Render Dashboard:
+#   geo-martin → Manual Deploy → Deploy latest commit
+
+# Or trigger via API (replace with your service ID from render.yaml / dashboard URL):
+curl -X POST https://api.render.com/v1/services/<SERVICE_ID>/deploys \
+  -H "Authorization: Bearer $RENDER_API_KEY" \
+  -H "Content-Type: application/json" -d '{}'
+```
+
+Martin auto-discovers all tables in the `geo` schema that have a registered geometry column.
+The tile URL pattern is: `https://geo-martin-<hash>.onrender.com/geo.<table_name>/{z}/{x}/{y}`
+
+**To clean up staging after promotion:**
+```sql
+-- Remove specific layer from raw_features
+DELETE FROM staging.raw_features WHERE layer_name = 'kenya_admin';
+
+-- Or drop a CLI-loaded staging table entirely
+DROP TABLE IF EXISTS staging.kenya_admin;
+```
+
+---
+
+### 3.4 Martin schema — can I point to a different schema?
+
+Yes. Martin's `from_schemas` config controls which schemas it publishes. Currently set to `geo`
+only. To add another schema, edit `martin/config.yaml`:
+
+```yaml
+postgres:
+  auto_publish:
+    from_schemas:
+      - geo
+      - my_other_schema   # ← add here
+```
+
+Then commit and push (Render redeploys automatically). Tables in `staging` and `audit` are
+intentionally excluded — `staging` is a landing zone for unvalidated data and `audit` is
+internal change history.
+
+---
+
+### 3.5 GeoParquet and PMTiles pipeline
+
+```bash
+# Any vector → optimised GeoParquet (Hilbert-sorted, ZSTD compressed, bbox columns)
 python scripts/to_geoparquet.py input.shp output.parquet
 python scripts/to_geoparquet.py input.geojson output.parquet --bbox "36.5,-1.5,37.2,-0.5"
 
-# Vector → PostGIS on Supabase (for live MVT layers via Martin)
-source projects/<name>/.env
-ogr2ogr -f PostgreSQL PG:"$SUPABASE_DATABASE_URL" input.geojson \
-  -nln geo.my_layer -lco GEOMETRY_NAME=geom -lco FID=id \
-  -t_srs EPSG:4326
-
-# GeoParquet → PMTiles (static layers, served from R2, no tile server)
+# GeoParquet → PMTiles (static tiles, served from R2, no tile server needed)
 ./scripts/to_pmtiles.sh data/input.parquet data/pmtiles/output.pmtiles --max-zoom 16
 
-# Sync to R2
-source projects/<name>/.env
-./scripts/r2_sync.sh data/pmtiles/ pmtiles/           # static tiles
-./scripts/r2_sync.sh projects/<name>/data/ <name>/    # GeoParquet for DuckDB
-
-# Overture Maps extract (buildings, roads, POIs for any bbox)
-python scripts/overture_extract.py \
-  --bbox "33.9,-4.7,41.9,5.0" \
-  --theme buildings \
-  --output data/kenya_buildings.parquet
-
-# Load Overture data into Supabase
-source projects/<name>/.env
-./scripts/load_postgis.sh data/kenya_buildings.parquet geo.buildings
+# Sync PMTiles and GeoParquet to Cloudflare R2
+./scripts/r2_sync.sh data/pmtiles/ pmtiles/         # static tiles
+./scripts/r2_sync.sh data/parquet/ parquet/          # GeoParquet for DuckDB analytics
 ```
+
+GeoParquet in R2 is accessed by the FastAPI `/analytics` endpoints via DuckDB's httpfs
+extension — no download required, DuckDB uses HTTP range requests to read only the
+partitions it needs.
+
+---
+
+### 3.6 Redeploy Martin after schema changes
+
+Martin discovers PostGIS tables only at startup. Any time you add a new table to `geo`:
+
+1. Render Dashboard → `geo-martin` → **Manual Deploy** → **Deploy latest commit**
+2. Wait ~30 seconds.
+3. Verify: `curl https://geo-martin-<hash>.onrender.com/catalog`
+
+The `/catalog` endpoint lists every published source. If your table isn't there, check:
+```sql
+SELECT * FROM geometry_columns WHERE f_table_schema = 'geo';
+```
+If the row is missing, the geometry column wasn't registered — run `Populate_Geometry_Columns`
+or recreate the table with an explicit `GEOMETRY(...)` type.
 
 ---
 

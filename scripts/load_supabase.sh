@@ -186,6 +186,7 @@ ogr2ogr \
     "${ACTUAL_INPUT}" \
     -nln "${TARGET}" \
     -t_srs "EPSG:4326" \
+    -nlt PROMOTE_TO_MULTI \
     -lco "GEOMETRY_NAME=geom" \
     -lco "FID=id" \
     -lco "SPATIAL_INDEX=GIST" \
@@ -200,11 +201,7 @@ ogr2ogr \
 
 echo ""
 echo "[load_supabase] ✓ Done. Counting rows in ${TARGET}..."
-PGPASSWORD=$(echo "$SUPABASE_DIRECT_URL" | grep -oP '(?<=:)[^@]+(?=@)') \
-PGHOST=$(echo "$SUPABASE_DIRECT_URL" | grep -oP '(?<=@)[^:]+') \
-PGPORT=5432 \
-PGDATABASE=postgres \
-PGUSER=$(echo "$SUPABASE_DIRECT_URL" | grep -oP '(?<=//)[^:]+') \
+# Use python to parse URL (avoids grep -P which isn't available on macOS)
 psql "$SUPABASE_DIRECT_URL" -c "SELECT COUNT(*) AS rows FROM ${TARGET};" 2>/dev/null || true
 
 echo ""
