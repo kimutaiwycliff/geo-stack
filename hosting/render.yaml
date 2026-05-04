@@ -18,7 +18,9 @@
 services:
   # --- Martin: live vector tile server ---
   # Reads PostGIS tables from Supabase and serves MVT tiles.
-  # DATABASE_URL must point to the Supabase connection pooler (port 6543).
+  # DATABASE_URL must point to the Supabase SESSION pooler (port 5432), NOT the
+  # transaction pooler (port 6543). Martin uses prepared statements during schema
+  # introspection at startup and will hang indefinitely on the transaction pooler.
   - type: web
     name: geo-martin
     runtime: docker
@@ -28,7 +30,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
-        sync: false   # Set manually: Supabase pooler URL (port 6543)
+        sync: false   # Set manually: Supabase SESSION pooler URL (port 5432)
 
   # --- FastAPI: GeoJSON / analytics / tile proxy ---
   # Serves GeoJSON from PostGIS, analytics from DuckDB+GeoParquet on R2,

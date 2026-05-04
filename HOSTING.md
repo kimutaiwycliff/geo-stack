@@ -64,7 +64,7 @@ Do this once. All projects share the same Render services, R2 bucket, and Vercel
    **geo-martin**:
    | Variable | Value |
    |---------|-------|
-   | `DATABASE_URL` | Supabase pooler URL (port 6543) — set per project, see §2 |
+   | `DATABASE_URL` | Supabase **session** pooler URL (port **5432**) — NOT port 6543. Martin uses prepared statements at startup and hangs on the transaction pooler. |
 
    **geo-api**:
    | Variable | Value |
@@ -134,14 +134,19 @@ This creates `projects/<name>/` with SQL files, a `.env` stub, and a layer confi
    ```
 4. Copy the connection string:
    Dashboard → Project Settings → Database → Connection string → **URI** (pooler).
-   It looks like:
+   **geo-api** uses the transaction pooler (port 6543):
    ```
    postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
    ```
-   Paste it into `projects/<name>/.env` → `SUPABASE_DATABASE_URL`.
+   **geo-martin** uses the session pooler (port 5432) — Martin runs prepared statements at
+   startup and hangs on port 6543:
+   ```
+   postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres
+   ```
+   Paste the appropriate URL into `projects/<name>/.env` → `SUPABASE_DATABASE_URL`.
 
 5. Update Martin on Render: Dashboard → `geo-martin` → Environment → `DATABASE_URL`
-   → paste the Supabase pooler URL → Save (triggers a redeploy).
+   → paste the **port 5432** (session pooler) URL → Save (triggers a redeploy).
 
 ### 2.3 Data in R2
 

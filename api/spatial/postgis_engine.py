@@ -19,13 +19,22 @@ _pool: asyncpg.Pool | None = None
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
     """Called by asyncpg for each new connection in the pool."""
-    # Register a passthrough codec for PostGIS geometry (OID 17 = bytea, geometry uses WKB)
-    # asyncpg treats 'geometry' as an unknown type; this codec returns raw bytes.
+    # Discover which schema owns the PostGIS geometry type at runtime.
+    # Local Docker installs PostGIS into 'public'; Supabase installs it into 'extensions'.
+    # Hardcoding 'public' causes ValueError on Supabase.
+    schema = await conn.fetchval(
+        "SELECT n.nspname FROM pg_type t "
+        "JOIN pg_namespace n ON t.typnamespace = n.oid "
+        "WHERE t.typname = 'geometry' LIMIT 1"
+    )
+    if schema is None:
+        log.warning("PostGIS 'geometry' type not found — is the PostGIS extension installed?")
+        return
     await conn.set_type_codec(
         "geometry",
         encoder=lambda v: v,
         decoder=lambda v: v,
-        schema="public",
+        schema=schema,
         format="text",
     )
 
