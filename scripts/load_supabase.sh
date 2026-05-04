@@ -67,10 +67,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Load env vars ──────────────────────────────────────────────────────────
+# Use a temp file export to avoid set -euo pipefail interfering with source
 for ENV_FILE in .env.cloud .env.local .env; do
     if [ -f "$ENV_FILE" ]; then
         echo "[load_supabase] Sourcing $ENV_FILE"
-        set -a; source "$ENV_FILE"; set +a
+        # grep out KEY=VALUE lines (skip comments and blanks), then export each
+        while IFS='=' read -r key rest; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            export "$key"="$rest"
+        done < <(grep -v '^\s*#' "$ENV_FILE" | grep -v '^\s*$' | grep '=')
         break
     fi
 done
@@ -98,21 +103,52 @@ if ! command -v ogr2ogr &>/dev/null; then
     exit 1
 fi
 
-# ── Special handling for ZIP containing a shapefile ────────────────────────
+# ── Special handling for ZIP containing one or more shapefiles ─────────────
 ACTUAL_INPUT="$INPUT"
 TMP_DIR=""
-if [[ "${INPUT,,}" == *.zip ]]; then
+if [[ "$(echo "$INPUT" | tr '[:upper:]' '[:lower:]')" == *.zip ]]; then
     TMP_DIR=$(mktemp -d)
     echo "[load_supabase] Extracting ZIP: $INPUT"
     unzip -q "$INPUT" -d "$TMP_DIR"
-    SHP_FILE=$(find "$TMP_DIR" -name "*.shp" | head -1)
-    if [ -z "$SHP_FILE" ]; then
+
+    # Count how many shapefiles are inside
+    SHP_COUNT=$(find "$TMP_DIR" -name "*.shp" | wc -l | tr -d ' ')
+
+    if [ "$SHP_COUNT" -eq 0 ]; then
         echo "ERROR: No .shp file found inside $INPUT"
         rm -rf "$TMP_DIR"
         exit 1
+    elif [ "$SHP_COUNT" -gt 1 ]; then
+        echo ""
+        echo "[load_supabase] ZIP contains $SHP_COUNT shapefiles:"
+        find "$TMP_DIR" -name "*.shp" | sort | while read -r f; do
+            echo "  $(basename "$f" .shp)"
+        done
+        echo ""
+        echo "  Hint: load a specific layer with --layer <basename>:"
+        echo "    $0 $INPUT $TARGET --layer adminareas"
+        echo ""
+        # If --layer was given, filter to that SHP
+        if [ -n "$OGR_LAYER" ]; then
+            LAYER_NAME=$(echo "$OGR_LAYER" | sed "s/-nln_alias '//;s/'//")
+            SHP_FILE=$(find "$TMP_DIR" -name "*${LAYER_NAME}*.shp" | head -1)
+            if [ -z "$SHP_FILE" ]; then
+                echo "ERROR: No shapefile matching '${LAYER_NAME}' found in ZIP."
+                rm -rf "$TMP_DIR"
+                exit 1
+            fi
+            OGR_LAYER=""   # nln_alias not needed; we use -nln TARGET below
+        else
+            SHP_FILE=$(find "$TMP_DIR" -name "*.shp" | sort | head -1)
+            echo "[load_supabase] Loading first layer: $(basename "$SHP_FILE")"
+            echo "[load_supabase] Re-run with --layer <name> to load a specific layer."
+        fi
+    else
+        SHP_FILE=$(find "$TMP_DIR" -name "*.shp")
     fi
+
     ACTUAL_INPUT="$SHP_FILE"
-    echo "[load_supabase] Found shapefile: $(basename "$SHP_FILE")"
+    echo "[load_supabase] Shapefile: $(basename "$SHP_FILE")"
 fi
 
 cleanup() {
@@ -129,9 +165,24 @@ echo "[load_supabase] Mode:    ${UPDATE_FLAG/-/}"
 echo "[load_supabase] ──────────────────────────────────────────────"
 echo ""
 
+# Build PG connection string: append sslmode only if not already in the URL
+PG_CONN="${SUPABASE_DIRECT_URL}"
+if [[ "$PG_CONN" != *sslmode* ]]; then
+    # URL format: append as query param; key=value format: append with space
+    if [[ "$PG_CONN" == postgresql://* || "$PG_CONN" == postgres://* ]]; then
+        if [[ "$PG_CONN" == *\?* ]]; then
+            PG_CONN="${PG_CONN}&sslmode=require"
+        else
+            PG_CONN="${PG_CONN}?sslmode=require"
+        fi
+    else
+        PG_CONN="${PG_CONN} sslmode=require"
+    fi
+fi
+
 ogr2ogr \
     -f "PostgreSQL" \
-    "PG:${SUPABASE_DIRECT_URL} sslmode=require" \
+    "PG:${PG_CONN}" \
     "${ACTUAL_INPUT}" \
     -nln "${TARGET}" \
     -t_srs "EPSG:4326" \
