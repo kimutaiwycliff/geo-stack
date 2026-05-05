@@ -160,7 +160,7 @@ export const layers: LayerConfig[] = [
     url: `${MARTIN_URL}/geo.adm_adm_0/{z}/{x}/{y}`,
     sourceLayer: 'geo.adm_adm_0',
     paint: {
-      'line-color': '#ae4713ff',
+      'line-color': '#13ae32ff',
       'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 10, 2],
       'line-opacity': 0.8,
     },
