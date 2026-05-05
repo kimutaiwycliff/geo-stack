@@ -32,6 +32,7 @@
     rows_inserted: number;
     error: string | null;
     parquet_key: string | null;
+    parquet_error: string | null;
   }
 
   interface JobRecord {
@@ -235,6 +236,7 @@
         rows_inserted: 0,
         error: null,
         parquet_key: null,
+        parquet_error: null,
       }));
 
       pollTimer = setInterval(pollBatch, 2000);
@@ -554,6 +556,8 @@
                       {/if}
                     </div>
                   </div>
+                {:else if row.parquet_error}
+                  <p class="parquet-err">GeoParquet failed: {row.parquet_error}</p>
                 {/if}
               </div>
             {/each}
@@ -996,6 +1000,7 @@
     align-self: flex-start;
   }
   .parquet-link:hover { text-decoration: underline; }
+  .parquet-err { font-size: 11px; color: #fca5a5; margin: 2px 0 0; }
 
   /* ── Shared utilities ───────────────────────────────────────────────────── */
   .dim   { font-size: 12px; color: #64748b; }

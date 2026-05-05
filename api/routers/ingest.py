@@ -386,8 +386,10 @@ async def _run_parquet_export(job_id: str) -> None:
     """
     Export the already-imported PostGIS table to GeoParquet and upload to R2.
 
-    Two-step: ogr2ogr reads from PostGIS → temp GeoJSON, then DuckDB converts to
-    Parquet.  Falls back cleanly (restores 'done' status) if anything goes wrong,
+    Uses asyncpg + ST_AsGeoJSON (no ogr2ogr cursor mode, compatible with
+    PgBouncer transaction pooling).  Then DuckDB converts GeoJSON → Parquet.
+
+    Falls back cleanly (restores 'done' status, stores error in parquet_error)
     so a parquet failure never kills the parent import.
     """
     pool = await get_postgis_pool()
@@ -404,7 +406,9 @@ async def _run_parquet_export(job_id: str) -> None:
     geojson_path = tmp_dir / f"_{safe_table}_export.geojson"
     parquet_path = tmp_dir / f"{safe_table}.parquet"
     parts = target_table.split(".", 1)
-    parquet_key = f"{parts[0]}/{parts[1]}/{job_id[:8]}.parquet" if len(parts) == 2 else f"exports/{job_id[:8]}.parquet"
+    schema_name = parts[0] if len(parts) == 2 else "public"
+    table_name  = parts[1] if len(parts) == 2 else target_table
+    parquet_key = f"{schema_name}/{table_name}/{job_id[:8]}.parquet"
 
     await _update_job(job_id, status="exporting_parquet")
     loop = asyncio.get_running_loop()
@@ -412,23 +416,41 @@ async def _run_parquet_export(job_id: str) -> None:
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 1: dump PostGIS table → temp GeoJSON
-        cmd = [
-            _ogr2ogr_bin(),
-            "-f", "GeoJSON",
-            str(geojson_path),
-            f"PG:{_direct_url()}",
-            target_table,
-            "-t_srs", "EPSG:4326",
-        ]
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        out, _ = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"GeoJSON export failed: {out.decode(errors='replace')[:300]}")
+        # Step 1: dump PostGIS table → GeoJSON via asyncpg + ST_AsGeoJSON
+        async with pool.acquire() as conn:
+            geom_col = await conn.fetchval(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_schema = $1 AND table_name = $2
+                  AND udt_name = 'geometry'
+                LIMIT 1
+                """,
+                schema_name, table_name,
+            ) or "geom"
+
+            rows = await conn.fetch(
+                f"SELECT row_to_json(t)::jsonb - '{geom_col}' AS props, "  # noqa: S608
+                f"ST_AsGeoJSON(ST_Transform(t.{geom_col}, 4326))::text AS geom_json "
+                f"FROM {target_table} t"
+            )
+
+        features = []
+        for row in rows:
+            geom_txt = row["geom_json"]
+            if not geom_txt:
+                continue
+            props = dict(row["props"] or {})
+            for k, v in list(props.items()):
+                if hasattr(v, "isoformat"):
+                    props[k] = v.isoformat()
+                elif not isinstance(v, (str, int, float, bool, type(None))):
+                    props[k] = str(v)
+            features.append({"type": "Feature", "geometry": json.loads(geom_txt), "properties": props})
+
+        async with aiofiles.open(geojson_path, "w") as fh:
+            await fh.write(json.dumps({"type": "FeatureCollection", "features": features}))
+
+        log.info("Job %s: wrote %d features to GeoJSON for parquet", job_id, len(features))
 
         # Step 2: GeoJSON → Parquet via DuckDB spatial
         def _to_parquet() -> None:
@@ -455,8 +477,9 @@ async def _run_parquet_export(job_id: str) -> None:
             log.warning("Job %s: parquet done but R2 not configured — file not uploaded", job_id)
 
     except Exception as exc:
-        log.error("Job %s: parquet export failed: %s", job_id, exc)
-        await _update_job(job_id, status="done")  # restore done; don't fail the import
+        err = str(exc)[:500]
+        log.error("Job %s: parquet export failed: %s", job_id, err)
+        await _update_job(job_id, status="done", parquet_error=err)
 
     finally:
         geojson_path.unlink(missing_ok=True)
@@ -552,7 +575,7 @@ async def get_batch_status(ids: str):
         rows = await conn.fetch(
             """
             SELECT id, source_layer, target_table, status,
-                   pct_complete, rows_inserted, error_message, parquet_key
+                   pct_complete, rows_inserted, error_message, parquet_key, parquet_error
             FROM staging.ingest_jobs
             WHERE id = ANY($1::uuid[])
             ORDER BY created_at
@@ -569,6 +592,7 @@ async def get_batch_status(ids: str):
             "rows_inserted": r["rows_inserted"],
             "error": r["error_message"],
             "parquet_key": r["parquet_key"],
+            "parquet_error": r["parquet_error"],
         }
         for r in rows
     ]
