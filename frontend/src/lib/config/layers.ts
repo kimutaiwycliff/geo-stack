@@ -170,6 +170,25 @@ export const layers: LayerConfig[] = [
     visible: true,
     popupFields: ['country', 'gid_0'],
     bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
+    hoverPopup: true,
+  },
+  {
+    id: 'adm_0',
+    label: 'Admin_0_Countries',
+    type: 'mvt',
+    url: `${MARTIN_URL}/geo.adm_adm_0/{z}/{x}/{y}`,
+    sourceLayer: 'geo.adm_adm_0',
+    paint: {
+      'line-color': '#11139cff',
+      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 10, 2],
+      'line-opacity': 0.8,
+    },
+    layout: { 'line-join': 'round', 'line-cap': 'round' },
+    minzoom: 2,
+    maxzoom: 23,
+    visible: true,
+    popupFields: ['country', 'gid_0'],
+    bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
   },
 
   // ─── Nairobi wards (PMTiles — static, zero-cost serving from R2) ──────────
