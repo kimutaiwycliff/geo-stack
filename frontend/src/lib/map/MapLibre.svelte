@@ -8,7 +8,7 @@
   import { basemapId, BASEMAPS, measureActive, contextMenu } from '$lib/stores/uiStore';
   import type { BasemapId } from '$lib/stores/uiStore';
   import { layers, type LayerConfig } from '$lib/config/layers';
-  import { addVectorLayer } from '$lib/layers/VectorLayer';
+  import { addVectorLayer, configIdFromLayerId } from '$lib/layers/VectorLayer';
   import { addPMTilesLayer } from '$lib/layers/PMTilesLayer';
   import { addGeoJSONLayer, refreshGeoJSONWithBBox } from '$lib/layers/GeoJSONLayer';
   import { addRasterLayer } from '$lib/layers/RasterLayer';
@@ -98,9 +98,10 @@
     const order = get(layerOrder);
     layers.forEach((config) => addLayerToMap(map, config));
     layers.forEach((config) => {
-      if (map.getLayer(config.id)) {
-        map.setLayoutProperty(config.id, 'visibility', vis[config.id] ? 'visible' : 'none');
-      }
+      const v = vis[config.id] ? 'visible' : 'none';
+      if (map.getLayer(config.id)) map.setLayoutProperty(config.id, 'visibility', v);
+      const hitId = `${config.id}__hit`;
+      if (map.getLayer(hitId)) map.setLayoutProperty(hitId, 'visibility', v);
     });
     applyLayerOrder(order);
     applyAllOpacities();
@@ -236,13 +237,16 @@
       contextMenu.set(null);
       if (get(measureActive)) return; // MeasureTool handles clicks in measure mode
 
-      const activeIds = layers.map((l) => l.id).filter((id) => map.getLayer(id));
+      // Include __hit fill layers so polygon interiors are clickable, not just borders.
+      const activeIds = layers
+        .flatMap((l) => [l.id, `${l.id}__hit`])
+        .filter((id) => map.getLayer(id));
       if (!activeIds.length) return;
       const features = map.queryRenderedFeatures(e.point, { layers: activeIds });
       if (!features.length) { clickPopupFeature = null; return; }
 
       const feature = features[0];
-      const config  = layers.find((l) => l.id === feature.layer.id);
+      const config  = layers.find((l) => l.id === configIdFromLayerId(feature.layer.id));
       if (!config?.popupFields?.length) { clickPopupFeature = null; return; }
 
       clickPopupFeature = feature.properties as Record<string, unknown>;
@@ -259,16 +263,19 @@
     map.on('mousemove', (e) => {
       if (get(measureActive)) return; // keep crosshair cursor during measure
 
-      const activeIds = layers.map((l) => l.id).filter((id) => map.getLayer(id));
+      const activeIds = layers
+        .flatMap((l) => [l.id, `${l.id}__hit`])
+        .filter((id) => map.getLayer(id));
       if (!activeIds.length) { map.getCanvas().style.cursor = ''; return; }
 
       const features = map.queryRenderedFeatures(e.point, { layers: activeIds });
       map.getCanvas().style.cursor = features.length ? 'pointer' : '';
 
-      const hoverFeature = features.find((f) => hoverLayersSnap[f.layer.id]);
+      // hoverLayersSnap is keyed by config.id; strip __hit suffix to match.
+      const hoverFeature = features.find((f) => hoverLayersSnap[configIdFromLayerId(f.layer.id)]);
       if (!hoverFeature) { hoverPopup.remove(); return; }
 
-      const config = layers.find((l) => l.id === hoverFeature.layer.id);
+      const config = layers.find((l) => l.id === configIdFromLayerId(hoverFeature.layer.id));
       if (!config?.popupFields?.length) { hoverPopup.remove(); return; }
 
       hoverPopup
@@ -295,9 +302,10 @@
     unsubVis = layerVisibility.subscribe((vis) => {
       if (!get(mapLoaded)) return;
       layers.forEach((config) => {
-        if (map.getLayer(config.id)) {
-          map.setLayoutProperty(config.id, 'visibility', vis[config.id] ? 'visible' : 'none');
-        }
+        const v = vis[config.id] ? 'visible' : 'none';
+        if (map.getLayer(config.id)) map.setLayoutProperty(config.id, 'visibility', v);
+        const hitId = `${config.id}__hit`;
+        if (map.getLayer(hitId)) map.setLayoutProperty(hitId, 'visibility', v);
       });
     });
 
