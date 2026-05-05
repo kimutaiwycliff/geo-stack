@@ -366,11 +366,11 @@
           <!-- Layer selection -->
           <div class="field">
             <div class="layer-header">
-              <span class="label">
-                {uploadResult.layers.length === 1
-                  ? '1 layer detected'
-                  : `${uploadResult.layers.length} layers detected — select which to import`}
-              </span>
+              {#if uploadResult.layers.length === 1}
+                <span class="label">1 layer detected</span>
+              {:else}
+                <span class="label">{uploadResult.layers.length} layers detected — select which to import</span>
+              {/if}
               {#if uploadResult.layers.length > 1}
                 <div class="row-gap">
                   <button class="btn ghost sm" on:click={selectAll}>All</button>
@@ -381,14 +381,13 @@
 
             <div class="layer-list">
               {#each uploadResult.layers as layer}
-                {@const sel = layerSelections[layer.name]}
-                <div class="layer-row" class:checked={sel?.checked}>
+                <div class="layer-row" class:checked={layerSelections[layer.name]?.checked}>
                   <!-- Checkbox + layer info row -->
                   <div class="layer-top-row">
                     <label class="layer-check-label">
                       <input
                         type="checkbox"
-                        checked={sel?.checked ?? false}
+                        checked={layerSelections[layer.name]?.checked ?? false}
                         on:change={() => toggleLayer(layer.name)}
                       />
                       <span class="layer-name">{layer.name}</span>
@@ -402,19 +401,19 @@
                   </div>
 
                   <!-- Expanded: target table + overwrite (only when checked) -->
-                  {#if sel?.checked}
+                  {#if layerSelections[layer.name]?.checked}
                     <div class="layer-config">
                       <input
                         class="text-input sm-input"
-                        value={sel.targetTable}
-                        on:input={(e) => updateTable(layer.name, (e.target as HTMLInputElement).value)}
+                        value={layerSelections[layer.name].targetTable}
+                        on:input={(e) => updateTable(layer.name, e.currentTarget.value)}
                         placeholder="staging.layer_name"
                         aria-label="Target table for {layer.name}"
                       />
                       <label class="checkbox-row compact">
                         <input
                           type="checkbox"
-                          checked={sel.overwrite}
+                          checked={layerSelections[layer.name].overwrite}
                           on:change={() => toggleOverwrite(layer.name)}
                         />
                         <span>Overwrite</span>
