@@ -172,24 +172,24 @@ export const layers: LayerConfig[] = [
     bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
     hoverPopup: true,
   },
-  {
-    id: 'adm_0',
-    label: 'Admin_0_Countries',
-    type: 'mvt',
-    url: `${MARTIN_URL}/geo.adm_adm_0/{z}/{x}/{y}`,
-    sourceLayer: 'geo.adm_adm_0',
-    paint: {
-      'line-color': '#11139cff',
-      'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 10, 2],
-      'line-opacity': 0.8,
-    },
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
-    minzoom: 2,
-    maxzoom: 23,
-    visible: true,
-    popupFields: ['country', 'gid_0'],
-    bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
-  },
+  // {
+  //   id: 'adm_0',
+  //   label: 'Admin_0_Countries',
+  //   type: 'mvt',
+  //   url: `${MARTIN_URL}/geo.adm_adm_0/{z}/{x}/{y}`,
+  //   sourceLayer: 'geo.adm_adm_0',
+  //   paint: {
+  //     'line-color': '#11139cff',
+  //     'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 10, 2],
+  //     'line-opacity': 0.8,
+  //   },
+  //   layout: { 'line-join': 'round', 'line-cap': 'round' },
+  //   minzoom: 2,
+  //   maxzoom: 23,
+  //   visible: true,
+  //   popupFields: ['country', 'gid_0'],
+  //   bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
+  // },
 
   // ─── Nairobi wards (PMTiles — static, zero-cost serving from R2) ──────────
   // Ward boundaries don't change → PMTiles is the right choice.
@@ -243,51 +243,31 @@ export const layers: LayerConfig[] = [
     bounds: [36.65, -1.44, 37.10, -1.16],   // Nairobi metro
     hoverPopup: true,
   },
-
-  // ─── Land parcels (MVT from Martin) ──────────────────────────────────────
-  // Write-heavy, KNN queries, audit trail → must live in PostGIS → MVT.
-  {
-    id: 'parcels',
-    label: 'Land Parcels',
-    type: 'mvt',
-    url: `${MARTIN_URL}/geo.parcels/{z}/{x}/{y}`,
-    sourceLayer: 'geo.parcels',
-    paint: {
-      'fill-color': '#d8120fff',
-      'fill-opacity': 0.3,
-      'fill-outline-color': '#d97706',
-    },
-    minzoom: 10,
-    maxzoom: 22,
-    visible: false,
-    popupFields: ['parcel_number', 'owner_name', 'area_ha', 'land_use'],
-    bounds: [36.78, -1.32, 36.87, -1.25],   // Nairobi central (parcel-scale)
-  },
-  {                                                                                                                                                              
-    id: 'kenya-roads',                                                                                                                                           
-    label: 'Kenya Roads (OSM)',                                                                                                                                  
-    type: 'mvt',                                                                                                                                                 
-    url: `${MARTIN_URL}/geo.kenya_roads/{z}/{x}/{y}`,
-    sourceLayer: 'geo.kenya_roads',                                                                                                                              
-    paint: {                                                                                                                                                   
-      'line-color': ['match', ['get', 'fclass'],                                                                                                                 
-        'motorway',  '#ef4444',                                                                                                                                  
-        'trunk',     '#f97316',                                                                                                                                  
-        'primary',   '#f59e0b',                                                                                                                                  
-        'secondary', '#84cc16',                                                                                                                                  
-        'tertiary',  '#6b7280',                                                                                                                                  
-                     '#3e4137ff',
-      ],                                                                                                                                                         
-      'line-width': ['interpolate', ['linear'], ['zoom'],                                                                                                      
-        6,  ['match', ['get', 'fclass'], 'motorway', 2, 'trunk', 1.5, 0.5],                                                                                      
-        14, ['match', ['get', 'fclass'], 'motorway', 6, 'trunk', 4, 'primary', 3, 1.5],                                                                          
-      ],                                                                                                                                                         
-      'line-opacity': 0.85,                                                                                                                                      
-    },                                                                                                                                                           
-    minzoom: 5,                                                                                                                                                  
-    maxzoom: 18,
-    visible: true,                                                                                                                                               
-    popupFields: ['name', 'fclass', 'ref', 'maxspeed', 'oneway'],                                                                                              
-    bounds: [33.91, -4.73, 42.08, 5.28],                                                                                                                         
-  },
+  // {                                                                                                                                                              
+  //   id: 'kenya-roads',                                                                                                                                           
+  //   label: 'Kenya Roads (OSM)',                                                                                                                                  
+  //   type: 'mvt',                                                                                                                                                 
+  //   url: `${MARTIN_URL}/geo.kenya_roads/{z}/{x}/{y}`,
+  //   sourceLayer: 'geo.kenya_roads',                                                                                                                              
+  //   paint: {                                                                                                                                                   
+  //     'line-color': ['match', ['get', 'fclass'],                                                                                                                 
+  //       'motorway',  '#ef4444',                                                                                                                                  
+  //       'trunk',     '#f97316',                                                                                                                                  
+  //       'primary',   '#f59e0b',                                                                                                                                  
+  //       'secondary', '#84cc16',                                                                                                                                  
+  //       'tertiary',  '#6b7280',                                                                                                                                  
+  //                    '#3e4137ff',
+  //     ],                                                                                                                                                         
+  //     'line-width': ['interpolate', ['linear'], ['zoom'],                                                                                                      
+  //       6,  ['match', ['get', 'fclass'], 'motorway', 2, 'trunk', 1.5, 0.5],                                                                                      
+  //       14, ['match', ['get', 'fclass'], 'motorway', 6, 'trunk', 4, 'primary', 3, 1.5],                                                                          
+  //     ],                                                                                                                                                         
+  //     'line-opacity': 0.85,                                                                                                                                      
+  //   },                                                                                                                                                           
+  //   minzoom: 5,                                                                                                                                                  
+  //   maxzoom: 18,
+  //   visible: true,                                                                                                                                               
+  //   popupFields: ['name', 'fclass', 'ref', 'maxspeed', 'oneway'],                                                                                              
+  //   bounds: [33.91, -4.73, 42.08, 5.28],                                                                                                                         
+  // },
 ];
