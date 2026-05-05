@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
 
   // ── Types ─────────────────────────────────────────────────────────────────
   interface DetectedLayer {
@@ -16,7 +16,16 @@
     layers: DetectedLayer[];
   }
 
-  interface JobProgress {
+  interface LayerSelection {
+    checked: boolean;
+    targetTable: string;
+    overwrite: boolean;
+  }
+
+  interface BatchLayerStatus {
+    job_id: string;
+    source_layer: string;
+    target_table: string | null;
     status: string;
     pct: number;
     rows_inserted: number;
@@ -37,13 +46,7 @@
   }
 
   // ── State ─────────────────────────────────────────────────────────────────
-  type Phase =
-    | 'idle'
-    | 'uploading'
-    | 'ready'
-    | 'processing'
-    | 'done'
-    | 'error';
+  type Phase = 'idle' | 'uploading' | 'ready' | 'processing' | 'done' | 'error';
 
   let phase: Phase = 'idle';
   let dragging = false;
@@ -54,18 +57,25 @@
   let uploadResult: UploadResult | null = null;
   let uploadError = '';
 
-  // Config phase
-  let selectedLayer = '';
-  let targetTable = '';
-  let overwrite = false;
+  // Layer selection — keyed by layer name
+  let layerSelections: Record<string, LayerSelection> = {};
 
-  // Processing phase
-  let jobProgress: JobProgress | null = null;
-  let jobEventSource: EventSource | null = null;
+  // Batch processing
+  let batchProgress: BatchLayerStatus[] = [];
+  let batchJobIds: string[] = [];
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   // Job history
   let recentJobs: JobRecord[] = [];
   let loadingJobs = false;
+
+  // ── Derived ───────────────────────────────────────────────────────────────
+  $: checkedLayers = (uploadResult?.layers ?? []).filter(l => layerSelections[l.name]?.checked);
+  $: canImport = checkedLayers.length > 0 &&
+    checkedLayers.every(l => (layerSelections[l.name]?.targetTable ?? '').trim().length > 0);
+  $: totalRowsInserted = batchProgress.reduce((sum, s) => sum + (s.rows_inserted ?? 0), 0);
+  $: doneCount = batchProgress.filter(s => s.status === 'done').length;
+  $: errorCount = batchProgress.filter(s => s.status === 'error').length;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
   onMount(async () => {
@@ -78,6 +88,8 @@
     } catch { /* fallback */ }
     loadJobs();
   });
+
+  onDestroy(() => { if (pollTimer) clearInterval(pollTimer); });
 
   // ── Drag & drop ───────────────────────────────────────────────────────────
   function onDragOver(e: DragEvent) { e.preventDefault(); dragging = true; }
@@ -98,15 +110,7 @@
     uploadPct = 0;
     uploadError = '';
     uploadResult = null;
-
-    // Auto-suggest table name from file name
-    if (!targetTable) {
-      targetTable = 'staging.' + file.name
-        .replace(/\.[^.]+$/, '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '_')
-        .slice(0, 40);
-    }
+    layerSelections = {};
 
     const form = new FormData();
     form.append('file', file);
@@ -120,10 +124,13 @@
       if (xhr.status >= 200 && xhr.status < 300) {
         try {
           uploadResult = JSON.parse(xhr.responseText) as UploadResult;
-          // Auto-select the only layer for single-layer files
-          if (uploadResult.layers.length === 1) {
-            selectedLayer = uploadResult.layers[0].name;
+          // Init all layers: pre-checked, auto-filled table name per layer
+          const sels: Record<string, LayerSelection> = {};
+          for (const layer of uploadResult.layers) {
+            const safeName = layer.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 40);
+            sels[layer.name] = { checked: true, targetTable: `staging.${safeName}`, overwrite: false };
           }
+          layerSelections = sels;
           phase = 'ready';
         } catch {
           uploadError = 'Unexpected server response.';
@@ -149,22 +156,52 @@
     xhr.send(form);
   }
 
+  // ── Select all / none ────────────────────────────────────────────────────
+  function selectAll() {
+    const updated: Record<string, LayerSelection> = {};
+    for (const [k, v] of Object.entries(layerSelections)) updated[k] = { ...v, checked: true };
+    layerSelections = updated;
+  }
+
+  function deselectAll() {
+    const updated: Record<string, LayerSelection> = {};
+    for (const [k, v] of Object.entries(layerSelections)) updated[k] = { ...v, checked: false };
+    layerSelections = updated;
+  }
+
+  function toggleLayer(name: string) {
+    layerSelections[name] = { ...layerSelections[name], checked: !layerSelections[name].checked };
+    layerSelections = layerSelections;
+  }
+
+  function updateTable(name: string, value: string) {
+    layerSelections[name] = { ...layerSelections[name], targetTable: value };
+    layerSelections = layerSelections;
+  }
+
+  function toggleOverwrite(name: string) {
+    layerSelections[name] = { ...layerSelections[name], overwrite: !layerSelections[name].overwrite };
+    layerSelections = layerSelections;
+  }
+
   // ── Process ───────────────────────────────────────────────────────────────
   async function startProcessing() {
-    if (!uploadResult || !targetTable || !selectedLayer) return;
+    if (!uploadResult || !canImport) return;
     phase = 'processing';
-    jobProgress = null;
+    batchProgress = [];
+    batchJobIds = [];
+
+    const layers = checkedLayers.map(l => ({
+      source_layer: l.name,
+      target_table: layerSelections[l.name].targetTable.trim(),
+      overwrite: layerSelections[l.name].overwrite,
+    }));
 
     try {
       const res = await fetch(`${apiUrl}/ingest/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          job_id: uploadResult.job_id,
-          target_table: targetTable,
-          source_layer: selectedLayer,
-          overwrite,
-        }),
+        body: JSON.stringify({ job_id: uploadResult.job_id, layers }),
       });
 
       if (!res.ok) {
@@ -174,49 +211,54 @@
         return;
       }
 
-      // Open SSE stream for progress
-      jobEventSource = new EventSource(`${apiUrl}/ingest/job/${uploadResult.job_id}`);
-      jobEventSource.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data) as JobProgress;
-          jobProgress = data;
-          if (data.status === 'done') {
-            phase = 'done';
-            jobEventSource?.close();
-            loadJobs();
-          } else if (data.status === 'error') {
-            phase = 'error';
-            uploadError = data.error ?? 'Processing failed';
-            jobEventSource?.close();
-            loadJobs();
-          }
-        } catch { /* ignore */ }
-      };
-      jobEventSource.onerror = () => {
-        if (phase === 'processing') {
-          uploadError = 'Lost connection to progress stream.';
-          phase = 'error';
-        }
-        jobEventSource?.close();
-      };
+      const data = await res.json();
+      batchJobIds = data.job_ids ?? [];
+
+      // Seed initial status rows (will be updated by polling)
+      batchProgress = checkedLayers.map((l, i) => ({
+        job_id: batchJobIds[i] ?? '',
+        source_layer: l.name,
+        target_table: layers[i].target_table,
+        status: 'queued',
+        pct: 0,
+        rows_inserted: 0,
+        error: null,
+      }));
+
+      pollTimer = setInterval(pollBatch, 2000);
+
     } catch (err) {
       uploadError = err instanceof Error ? err.message : String(err);
       phase = 'error';
     }
   }
 
+  async function pollBatch() {
+    if (!batchJobIds.length) return;
+    try {
+      const r = await fetch(`${apiUrl}/ingest/batch?ids=${batchJobIds.join(',')}`);
+      if (!r.ok) return;
+      const data: BatchLayerStatus[] = await r.json();
+      batchProgress = data;
+
+      if (data.every(s => s.status === 'done' || s.status === 'error')) {
+        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+        phase = 'done';
+        loadJobs();
+      }
+    } catch { /* keep polling */ }
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────────────
   function reset() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     phase = 'idle';
     uploadPct = 0;
     uploadResult = null;
     uploadError = '';
-    selectedLayer = '';
-    targetTable = '';
-    overwrite = false;
-    jobProgress = null;
-    jobEventSource?.close();
-    jobEventSource = null;
+    layerSelections = {};
+    batchProgress = [];
+    batchJobIds = [];
   }
 
   async function loadJobs() {
@@ -294,8 +336,8 @@
 
         <div class="info-box">
           <strong>No size limit.</strong> Files are streamed to the server and processed with
-          ogr2ogr — no browser memory constraints. Large shapefiles, GeoPackages, and
-          GeoParquet files all work.
+          ogr2ogr — no browser memory constraints. Multi-layer files (GeoPackage, Shapefile ZIP)
+          let you import all layers in one go.
         </div>
       {/if}
 
@@ -309,7 +351,7 @@
         </div>
       {/if}
 
-      <!-- READY: layer selector + target table -->
+      <!-- READY: layer selector -->
       {#if phase === 'ready' && uploadResult}
         <div class="card">
           <div class="file-row">
@@ -321,62 +363,82 @@
             <button class="btn ghost sm" on:click={reset}>Change</button>
           </div>
 
-          <!-- Layer selector -->
+          <!-- Layer selection -->
           <div class="field">
-            <label class="label">
-              {uploadResult.layers.length === 1 ? 'Layer detected' : `Select a layer (${uploadResult.layers.length} found)`}
-            </label>
+            <div class="layer-header">
+              <span class="label">
+                {uploadResult.layers.length === 1
+                  ? '1 layer detected'
+                  : `${uploadResult.layers.length} layers detected — select which to import`}
+              </span>
+              {#if uploadResult.layers.length > 1}
+                <div class="row-gap">
+                  <button class="btn ghost sm" on:click={selectAll}>All</button>
+                  <button class="btn ghost sm" on:click={deselectAll}>None</button>
+                </div>
+              {/if}
+            </div>
 
-            {#if uploadResult.layers.length === 1}
-              <!-- Single layer: just show it -->
-              <div class="single-layer">
-                <span class="layer-chip">{uploadResult.layers[0].name}</span>
-                <span class="dim">{uploadResult.layers[0].geometry_type}</span>
-                {#if uploadResult.layers[0].feature_count > 0}
-                  <span class="dim">· {uploadResult.layers[0].feature_count.toLocaleString()} features</span>
-                {/if}
-              </div>
-            {:else}
-              <!-- Multiple layers: radio list -->
-              <div class="layer-list">
-                {#each uploadResult.layers as layer}
-                  <label class="layer-row" class:selected={selectedLayer === layer.name}>
-                    <input type="radio" bind:group={selectedLayer} value={layer.name}/>
-                    <div class="layer-meta">
+            <div class="layer-list">
+              {#each uploadResult.layers as layer}
+                {@const sel = layerSelections[layer.name]}
+                <div class="layer-row" class:checked={sel?.checked}>
+                  <!-- Checkbox + layer info row -->
+                  <div class="layer-top-row">
+                    <label class="layer-check-label">
+                      <input
+                        type="checkbox"
+                        checked={sel?.checked ?? false}
+                        on:change={() => toggleLayer(layer.name)}
+                      />
                       <span class="layer-name">{layer.name}</span>
-                      <span class="dim">{layer.geometry_type}</span>
+                    </label>
+                    <div class="layer-badges">
+                      <span class="geom-chip">{layer.geometry_type}</span>
                       {#if layer.feature_count > 0}
-                        <span class="dim">· {layer.feature_count.toLocaleString()} features</span>
+                        <span class="dim">{layer.feature_count.toLocaleString()} features</span>
                       {/if}
                     </div>
-                  </label>
-                {/each}
-              </div>
-            {/if}
+                  </div>
+
+                  <!-- Expanded: target table + overwrite (only when checked) -->
+                  {#if sel?.checked}
+                    <div class="layer-config">
+                      <input
+                        class="text-input sm-input"
+                        value={sel.targetTable}
+                        on:input={(e) => updateTable(layer.name, (e.target as HTMLInputElement).value)}
+                        placeholder="staging.layer_name"
+                        aria-label="Target table for {layer.name}"
+                      />
+                      <label class="checkbox-row compact">
+                        <input
+                          type="checkbox"
+                          checked={sel.overwrite}
+                          on:change={() => toggleOverwrite(layer.name)}
+                        />
+                        <span>Overwrite</span>
+                      </label>
+                    </div>
+                  {/if}
+                </div>
+              {/each}
+            </div>
           </div>
 
-          <!-- Target table -->
-          <div class="field">
-            <label class="label" for="tt">
-              Target table
-              <span class="dim">(schema.table_name — will be created if it doesn't exist)</span>
-            </label>
-            <input id="tt" class="text-input" bind:value={targetTable}
-                   placeholder="staging.kenya_roads"/>
-          </div>
-
-          <!-- Overwrite toggle -->
-          <label class="checkbox-row">
-            <input type="checkbox" bind:checked={overwrite}/>
-            <span>Overwrite if table already exists</span>
-          </label>
-
+          <!-- Import button -->
           <button
             class="btn primary wide"
-            disabled={!selectedLayer || !targetTable}
+            disabled={!canImport}
             on:click={startProcessing}
           >
-            Import → {targetTable || '…'}
+            {#if checkedLayers.length === 0}
+              Select at least one layer
+            {:else if checkedLayers.length === 1}
+              Import layer → {layerSelections[checkedLayers[0].name]?.targetTable || '…'}
+            {:else}
+              Import {checkedLayers.length} layers
+            {/if}
           </button>
         </div>
       {/if}
@@ -386,50 +448,91 @@
         <div class="card">
           <p class="card-title">Processing with ogr2ogr…</p>
 
-          {#if jobProgress}
-            {@const status = jobProgress.status}
-            <div class="status-badge" data-colour={statusColour(status)}>{status}</div>
-            <div class="prog-track">
-              <div class="prog-fill" style="width:{jobProgress.pct}%"></div>
-            </div>
-            <p class="prog-label">{jobProgress.pct}%</p>
-            {#if jobProgress.rows_inserted > 0}
-              <p class="hint-text">{jobProgress.rows_inserted.toLocaleString()} rows inserted so far</p>
-            {/if}
+          {#if batchProgress.length === 0}
+            <div class="spinner-row"><span class="spinner"></span> Starting…</div>
           {:else}
-            <div class="spinner-row"><span class="spinner"></span> Queued — starting…</div>
+            <div class="batch-list">
+              {#each batchProgress as row}
+                <div class="batch-row">
+                  <div class="batch-row-top">
+                    <span class="layer-name">{row.source_layer}</span>
+                    <span class="dim arrow">→</span>
+                    <span class="target-label">{row.target_table ?? '…'}</span>
+                    <span class="status-badge" data-colour={statusColour(row.status)}>{row.status}</span>
+                  </div>
+                  {#if row.status === 'processing' || row.status === 'done'}
+                    <div class="prog-track sm"><div class="prog-fill" style="width:{row.pct}%"></div></div>
+                    {#if row.rows_inserted > 0}
+                      <span class="dim">{row.rows_inserted.toLocaleString()} rows</span>
+                    {/if}
+                  {/if}
+                  {#if row.status === 'queued'}
+                    <div class="spinner-row sm"><span class="spinner"></span> Queued…</div>
+                  {/if}
+                  {#if row.error}
+                    <p class="error-msg sm">{row.error}</p>
+                  {/if}
+                </div>
+              {/each}
+            </div>
           {/if}
 
           <p class="hint-text muted">
-            ogr2ogr is running server-side. You can close this tab — the job continues.
-            Come back and check <strong>Job history</strong> for the result.
+            Layers are processed sequentially. You can close this tab — jobs continue server-side.
           </p>
         </div>
       {/if}
 
       <!-- DONE -->
       {#if phase === 'done'}
-        <div class="card success">
-          <p class="card-title">✓ Import complete</p>
-          {#if jobProgress}
-            <p class="big-num">{jobProgress.rows_inserted.toLocaleString()}</p>
-            <p class="hint-text">rows inserted into <code>{targetTable}</code></p>
+        <div class="card" class:success={errorCount === 0} class:partial={errorCount > 0 && doneCount > 0} class:error-card={doneCount === 0 && errorCount > 0}>
+          <p class="card-title">
+            {#if errorCount === 0}✓ Import complete{:else if doneCount > 0}Import finished with errors{:else}Import failed{/if}
+          </p>
+
+          {#if totalRowsInserted > 0}
+            <p class="big-num">{totalRowsInserted.toLocaleString()}</p>
+            <p class="hint-text">total rows inserted across {doneCount} layer{doneCount !== 1 ? 's' : ''}</p>
           {/if}
-          <div class="next-steps">
-            <p class="label">Next steps</p>
-            <ul>
-              <li>Inspect: <code>SELECT * FROM {targetTable} LIMIT 10;</code></li>
-              <li>Promote to <code>geo</code> schema so Martin serves tiles:
-                <code>ALTER TABLE {targetTable} SET SCHEMA geo;</code>
-              </li>
-              <li>Then redeploy Martin on Render (Manual Deploy).</li>
-            </ul>
+
+          <!-- Per-layer results -->
+          <div class="batch-list">
+            {#each batchProgress as row}
+              <div class="batch-row">
+                <div class="batch-row-top">
+                  <span class="layer-name">{row.source_layer}</span>
+                  <span class="dim arrow">→</span>
+                  <span class="target-label">{row.target_table ?? '…'}</span>
+                  <span class="status-badge" data-colour={statusColour(row.status)}>{row.status}</span>
+                  {#if row.rows_inserted > 0}
+                    <span class="dim">{row.rows_inserted.toLocaleString()} rows</span>
+                  {/if}
+                </div>
+                {#if row.error}
+                  <p class="error-msg sm">{row.error}</p>
+                {/if}
+              </div>
+            {/each}
           </div>
+
+          {#if doneCount > 0}
+            <div class="next-steps">
+              <p class="label">Next steps</p>
+              <ul>
+                <li>Inspect: <code>SELECT * FROM {batchProgress.find(s => s.status === 'done')?.target_table ?? 'staging.layer'} LIMIT 10;</code></li>
+                <li>Promote to <code>geo</code> schema so Martin serves tiles:
+                  <code>ALTER TABLE staging.your_table SET SCHEMA geo;</code>
+                </li>
+                <li>Then redeploy Martin on Render (Manual Deploy).</li>
+              </ul>
+            </div>
+          {/if}
+
           <button class="btn primary" on:click={reset}>Upload another file</button>
         </div>
       {/if}
 
-      <!-- ERROR -->
+      <!-- ERROR (upload-phase errors) -->
       {#if phase === 'error'}
         <div class="card error-card">
           <p class="card-title">Something went wrong</p>
@@ -564,6 +667,7 @@
     gap: 14px;
   }
   .card.success { border-color: rgba(34,197,94,0.25); background: rgba(34,197,94,0.04); }
+  .card.partial { border-color: rgba(234,179,8,0.25); background: rgba(234,179,8,0.04); }
   .card.error-card { border-color: rgba(239,68,68,0.25); background: rgba(239,68,68,0.04); }
   .card-title { font-size: 15px; font-weight: 600; color: #f1f5f9; margin: 0; }
 
@@ -603,52 +707,76 @@
   }
   @keyframes spin { to { transform: rotate(360deg); } }
   .spinner-row { display: flex; align-items: center; gap: 10px; color: #94a3b8; }
+  .spinner-row.sm { font-size: 12px; }
 
   /* ── Layer selector ─────────────────────────────────────────────────────── */
   .field { display: flex; flex-direction: column; gap: 6px; }
   .label { font-size: 12px; font-weight: 500; color: #94a3b8; }
 
-  .single-layer {
+  .layer-header {
     display: flex;
+    justify-content: space-between;
     align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    background: rgba(255,255,255,0.04);
-    border-radius: 8px;
+    margin-bottom: 4px;
   }
-  .layer-chip {
-    background: rgba(37,99,235,0.2);
-    border: 1px solid rgba(37,99,235,0.35);
-    color: #93c5fd;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 12px;
-    font-family: 'SF Mono', monospace;
-  }
+  .row-gap { display: flex; gap: 6px; }
 
   .layer-list {
     display: flex;
     flex-direction: column;
     gap: 4px;
-    max-height: 260px;
+    max-height: 380px;
     overflow-y: auto;
   }
+
   .layer-row {
+    border: 1px solid rgba(255,255,255,0.05);
+    background: rgba(255,255,255,0.02);
+    border-radius: 8px;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .layer-row.checked {
+    background: rgba(37,99,235,0.08);
+    border-color: rgba(37,99,235,0.28);
+  }
+
+  .layer-top-row {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 9px 12px;
-    border-radius: 8px;
-    cursor: pointer;
-    border: 1px solid rgba(255,255,255,0.05);
-    background: rgba(255,255,255,0.02);
-    transition: background 0.15s, border-color 0.15s;
+    flex-wrap: wrap;
   }
-  .layer-row:hover { background: rgba(255,255,255,0.05); }
-  .layer-row.selected { background: rgba(37,99,235,0.12); border-color: rgba(37,99,235,0.35); }
-  .layer-row input { accent-color: #3b82f6; }
-  .layer-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-  .layer-name { font-family: 'SF Mono', monospace; font-size: 13px; color: #e2e8f0; }
+  .layer-check-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    cursor: pointer;
+    flex: 1;
+    min-width: 0;
+  }
+  .layer-check-label input { accent-color: #3b82f6; flex-shrink: 0; }
+  .layer-name { font-family: 'SF Mono', monospace; font-size: 13px; color: #e2e8f0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .layer-badges { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+  .geom-chip {
+    background: rgba(37,99,235,0.18);
+    border: 1px solid rgba(37,99,235,0.3);
+    color: #93c5fd;
+    border-radius: 4px;
+    padding: 1px 7px;
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .layer-config {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding-top: 2px;
+  }
 
   /* ── Form fields ─────────────────────────────────────────────────────────── */
   .text-input {
@@ -665,6 +793,7 @@
     font-family: 'SF Mono', monospace;
   }
   .text-input:focus { border-color: #3b82f6; }
+  .sm-input { padding: 6px 10px; font-size: 12px; flex: 1; }
 
   .checkbox-row {
     display: flex;
@@ -673,8 +802,34 @@
     font-size: 13px;
     color: #94a3b8;
     cursor: pointer;
+    white-space: nowrap;
   }
   .checkbox-row input { accent-color: #3b82f6; }
+  .checkbox-row.compact { font-size: 12px; }
+
+  /* ── Batch progress list ─────────────────────────────────────────────────── */
+  .batch-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .batch-row {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .batch-row-top {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .arrow { font-size: 10px; }
+  .target-label { font-family: 'SF Mono', monospace; font-size: 12px; color: #60a5fa; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* ── Success state ───────────────────────────────────────────────────────── */
   .big-num { font-size: 36px; font-weight: 700; color: #86efac; margin: 0; line-height: 1; }
@@ -726,6 +881,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
+    white-space: nowrap;
   }
   .status-badge[data-colour="green"] { background: rgba(34,197,94,0.15); color: #86efac; }
   .status-badge[data-colour="red"]   { background: rgba(239,68,68,0.15);  color: #fca5a5; }

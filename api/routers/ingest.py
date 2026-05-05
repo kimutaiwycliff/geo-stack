@@ -187,7 +187,10 @@ async def _run_ogr2ogr(job_id: str) -> None:
     if not job:
         return
 
-    file_path = TMP_ROOT / job_id / job["file_name"]
+    # r2_key is always "{upload_job_id}/{filename}" — first segment is the /tmp directory.
+    # Child jobs have a different job_id but share the upload job's /tmp directory.
+    upload_dir_id = job["r2_key"].split("/")[0] if job["r2_key"] else job_id
+    file_path = TMP_ROOT / upload_dir_id / job["file_name"]
 
     # If /tmp was cleared (API restart) and we have an R2 backup, restore it
     if not file_path.exists() and job.get("r2_key") and r2_client.r2_configured():
@@ -285,10 +288,7 @@ async def _run_ogr2ogr(job_id: str) -> None:
     except Exception as exc:
         await _update_job(job_id, status="error", error_message=str(exc)[:500])
         log.exception("Job %s: unexpected error", job_id)
-
-    finally:
-        # Clean up /tmp directory for this job
-        shutil.rmtree(TMP_ROOT / job_id, ignore_errors=True)
+    # /tmp cleanup is handled by _run_batch after all layers in the batch finish
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -339,8 +339,9 @@ async def upload_file_for_processing(
         raise HTTPException(422, "No readable layers found in this file. "
                             "Check that it is a valid vector format.")
 
-    # Create job record
-    r2_key = f"{job_id}/{safe_name}" if r2_client.r2_configured() else None
+    # r2_key always set — used as a stable path key ("{upload_job_id}/{filename}")
+    # so child jobs can derive the /tmp upload directory. Actual R2 upload is conditional.
+    r2_key = f"{job_id}/{safe_name}"
     pool = await get_postgis_pool()
     async with pool.acquire() as conn:
         await conn.execute(
@@ -352,8 +353,8 @@ async def upload_file_for_processing(
             job_id, safe_name, file_size, r2_key, json.dumps(layers),
         )
 
-    # Back up to R2 in background (non-blocking)
-    if r2_key:
+    # Back up to R2 in background (non-blocking, only if R2 is configured)
+    if r2_client.r2_configured():
         background_tasks.add_task(
             r2_client.upload_file, tmp_path, r2_key, settings.r2_uploads_bucket
         )
@@ -361,10 +362,9 @@ async def upload_file_for_processing(
     return {"job_id": job_id, "file_name": safe_name, "file_size_bytes": file_size, "layers": layers}
 
 
-class ProcessRequest(BaseModel):
-    job_id: str
+class LayerTarget(BaseModel):
+    source_layer: str
     target_table: str
-    source_layer: str | None = None
     overwrite: bool = False
 
     @field_validator("target_table")
@@ -376,35 +376,117 @@ class ProcessRequest(BaseModel):
             raise ValueError(str(exc)) from exc
 
 
+class ProcessRequest(BaseModel):
+    job_id: str           # the upload job ID (returned by POST /ingest/upload)
+    layers: list[LayerTarget]  # one or more layers to import from the same file
+
+
+async def _run_batch(job_ids: list[str], upload_job_id: str) -> None:
+    """Run ogr2ogr for each layer sequentially, then clean up /tmp."""
+    for job_id in job_ids:
+        await _run_ogr2ogr(job_id)
+    # All layers done — remove the shared /tmp upload directory
+    shutil.rmtree(TMP_ROOT / upload_job_id, ignore_errors=True)
+    log.info("Batch complete: %d layers, cleaned up /tmp/%s", len(job_ids), upload_job_id)
+
+
 @router.post("/process")
 async def process_job(req: ProcessRequest, background_tasks: BackgroundTasks):
     """
-    Start an ogr2ogr background job for a previously uploaded file.
-    Stream progress via GET /ingest/job/{job_id}.
+    Start ogr2ogr background jobs for one or more layers from a previously uploaded file.
+    Layers are processed sequentially to stay within Render's free-tier RAM limit.
+
+    Returns {job_ids: [...]} — one ID per layer. Poll GET /ingest/batch?ids=... for progress.
     """
+    if not req.layers:
+        raise HTTPException(400, "Specify at least one layer to import")
+
     pool = await get_postgis_pool()
     async with pool.acquire() as conn:
-        job = await conn.fetchrow(
-            "SELECT id, status FROM staging.ingest_jobs WHERE id = $1", req.job_id
+        upload = await conn.fetchrow(
+            "SELECT id, file_name, file_size_bytes, r2_key, detected_layers, status "
+            "FROM staging.ingest_jobs WHERE id = $1",
+            req.job_id,
         )
-    if not job:
-        raise HTTPException(404, "Job not found")
-    if job["status"] not in ("pending", "error"):
-        raise HTTPException(400, f"Job is already {job['status']} — cannot reprocess")
+    if not upload:
+        raise HTTPException(404, "Upload job not found")
+    if upload["status"] not in ("pending", "error"):
+        raise HTTPException(400, f"Upload job is already {upload['status']}")
 
+    job_ids: list[str] = []
+
+    for i, layer in enumerate(req.layers):
+        if i == 0:
+            # Reuse the original upload job record for the first layer
+            layer_job_id = req.job_id
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE staging.ingest_jobs
+                    SET target_table = $2, source_layer = $3, overwrite = $4,
+                        status = 'queued', pct_complete = 0,
+                        error_message = NULL, updated_at = now()
+                    WHERE id = $1
+                    """,
+                    layer_job_id, layer.target_table, layer.source_layer, layer.overwrite,
+                )
+        else:
+            # Create a new job record per additional layer, copying file metadata
+            layer_job_id = str(uuid.uuid4())
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO staging.ingest_jobs
+                        (id, file_name, file_size_bytes, r2_key, detected_layers,
+                         target_table, source_layer, overwrite, status)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'queued')
+                    """,
+                    layer_job_id,
+                    upload["file_name"], upload["file_size_bytes"],
+                    upload["r2_key"], upload["detected_layers"],
+                    layer.target_table, layer.source_layer, layer.overwrite,
+                )
+        job_ids.append(layer_job_id)
+
+    background_tasks.add_task(_run_batch, job_ids, req.job_id)
+    return {"job_ids": job_ids, "count": len(job_ids)}
+
+
+@router.get("/batch")
+async def get_batch_status(ids: str):
+    """
+    Return current status for a comma-separated list of job IDs.
+    Used by the frontend to poll multi-layer import progress.
+    GET /ingest/batch?ids=id1,id2,id3
+    """
+    id_list = [i.strip() for i in ids.split(",") if i.strip()]
+    if not id_list:
+        return []
+
+    pool = await get_postgis_pool()
     async with pool.acquire() as conn:
-        await conn.execute(
+        rows = await conn.fetch(
             """
-            UPDATE staging.ingest_jobs
-            SET target_table = $2, source_layer = $3, overwrite = $4, status = 'queued',
-                pct_complete = 0, error_message = NULL, updated_at = now()
-            WHERE id = $1
+            SELECT id, source_layer, target_table, status,
+                   pct_complete, rows_inserted, error_message
+            FROM staging.ingest_jobs
+            WHERE id = ANY($1::uuid[])
+            ORDER BY created_at
             """,
-            req.job_id, req.target_table, req.source_layer, req.overwrite,
+            id_list,
         )
-
-    background_tasks.add_task(_run_ogr2ogr, req.job_id)
-    return {"job_id": req.job_id, "status": "queued"}
+    return [
+        {
+            "job_id": str(r["id"]),
+            "source_layer": r["source_layer"],
+            "target_table": r["target_table"],
+            "status": r["status"],
+            "pct": r["pct_complete"],
+            "rows_inserted": r["rows_inserted"],
+            "error": r["error_message"],
+        }
+        for r in rows
+    ]
 
 
 @router.get("/job/{job_id}")
