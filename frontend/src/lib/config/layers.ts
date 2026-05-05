@@ -155,12 +155,12 @@ export const layers: LayerConfig[] = [
   // Changes rarely but must be queryable at all zoom levels → MVT is ideal.
   {
     id: 'boundaries',
-    label: 'Admin',
+    label: 'Admin_0_Countries',
     type: 'mvt',
-    url: `${MARTIN_URL}/geo.admin/{z}/{x}/{y}`,
-    sourceLayer: 'geo.admin',
+    url: `${MARTIN_URL}/geo.adm_adm_0/{z}/{x}/{y}`,
+    sourceLayer: 'geo.adm_adm_0',
     paint: {
-      'line-color': '#374151',
+      'line-color': '#ae4713ff',
       'line-width': ['interpolate', ['linear'], ['zoom'], 4, 1, 10, 2],
       'line-opacity': 0.8,
     },
