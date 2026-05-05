@@ -70,5 +70,15 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci
         working-directory: frontend
-      - run: npm run check
+      - name: Type-check
         working-directory: frontend
+        # PUBLIC_* env vars are needed so svelte-kit sync generates the
+        # $env/static/public types. frontend/.env.development provides these
+        # as defaults; the explicit env: block below is a belt-and-suspenders
+        # fallback for environments that don't pick up the file.
+        env:
+          PUBLIC_MARTIN_URL: http://localhost:3000
+          PUBLIC_API_URL: http://localhost:8000
+          PUBLIC_TITILER_URL: http://localhost:8080
+          PUBLIC_R2_URL: ""
+        run: npm run check

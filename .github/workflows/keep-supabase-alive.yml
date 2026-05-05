@@ -4,15 +4,12 @@ name: Keep Supabase alive
 # This workflow runs a PostGIS query twice a week to prevent pausing.
 #
 # Setup:
-#   1. GitHub → Settings → Secrets and variables → Actions → New repository secret
-#   2. Add secret: SUPABASE_DATABASE_URL
-#      Value: your Supabase connection pooler URL (port 6543)
-#      Format: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
+#   GitHub → Settings → Secrets and variables → Actions → New repository secret
+#   Name:  SUPABASE_DATABASE_URL
+#   Value: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
 #
-# For multiple Supabase projects (one per client), add more secrets and
-# duplicate the ping step — see commented example at the bottom.
-#
-# Cost: ~2 GitHub Actions minutes/week. Well within the 2,000 min/month free limit.
+# If the secret is not configured the job exits cleanly with a warning
+# rather than failing and sending an email.
 
 on:
   schedule:
@@ -28,6 +25,12 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL }}
         run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "⚠️  SUPABASE_DATABASE_URL secret is not set — skipping ping."
+            echo "Add it in: GitHub repo → Settings → Secrets and variables → Actions"
+            exit 0
+          fi
+
           sudo apt-get install -y postgresql-client -q
 
           # Use a PostGIS query — a generic SELECT 1 may not count as "activity"
@@ -35,13 +38,14 @@ jobs:
           psql "$DATABASE_URL" --no-password -c \
             "SELECT extensions.PostGIS_Version(), NOW() AS pinged_at;"
 
-          echo "Ping successful — project will not be paused"
+          echo "✅ Ping successful — project will not be paused"
 
       # Duplicate this step for each additional Supabase project:
       # - name: Ping project 2 (client name)
       #   env:
       #     DATABASE_URL: ${{ secrets.SUPABASE_DATABASE_URL_CLIENT2 }}
       #   run: |
+      #     if [ -z "$DATABASE_URL" ]; then exit 0; fi
       #     sudo apt-get install -y postgresql-client -q
       #     psql "$DATABASE_URL" --no-password -c \
       #       "SELECT extensions.PostGIS_Version(), NOW() AS pinged_at;"

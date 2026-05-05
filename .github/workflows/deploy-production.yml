@@ -1,8 +1,18 @@
-name: Deploy to production
+name: Deploy to production (VPS)
 
+# This workflow deploys to a self-hosted VPS via SSH.
+# It is NOT needed for the Render + Vercel cloud deployment — those services
+# redeploy automatically when you push to GitHub.
+#
+# Only trigger manually so it does not run on every push and generate failure
+# emails when the production secrets (PRODUCTION_HOST / PRODUCTION_USER /
+# PRODUCTION_SSH_KEY) are not configured.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy" to confirm'
+        required: true
 
 # Only run one deploy at a time
 concurrency:
@@ -14,6 +24,7 @@ jobs:
     name: Deploy via SSH
     runs-on: ubuntu-latest
     environment: production
+    if: github.event.inputs.confirm == 'deploy'
 
     steps:
       - name: Deploy via SSH
