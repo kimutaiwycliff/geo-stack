@@ -168,7 +168,7 @@ export const layers: LayerConfig[] = [
     minzoom: 2,
     maxzoom: 23,
     visible: true,
-    popupFields: ['country', 'gid_0'],
+    popupFields: ['name_1'],
     bounds: [33.9095880000001, -4.72041700099993, 41.9262161260002, 5.06116580999998],   // Kenya extent
     hoverPopup: true,
   },
