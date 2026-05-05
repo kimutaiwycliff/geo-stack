@@ -140,15 +140,15 @@ export interface LayerConfig {
  *   }
  */
 
-// URLs are injected at runtime from /api/config — see +server.ts
-// These defaults work for local development (docker-compose.local.yml)
-const API_URL = typeof window !== 'undefined'
-  ? (window as Window & { __GEO_CONFIG__?: { apiUrl: string } }).__GEO_CONFIG__?.apiUrl ?? 'http://localhost:8000'
-  : 'http://localhost:8000';
+// URLs are resolved at BUILD time from $env/static/public.
+// Set PUBLIC_MARTIN_URL and PUBLIC_API_URL in your environment:
+//   - Local dev:  .env  (PUBLIC_MARTIN_URL=http://localhost:3000)
+//   - Vercel:     Project Settings → Environment Variables
+//   - VPS:        docker-compose.production.yml env section
+import { PUBLIC_MARTIN_URL, PUBLIC_API_URL } from '$env/static/public';
 
-const MARTIN_URL = typeof window !== 'undefined'
-  ? (window as Window & { __GEO_CONFIG__?: { martinUrl: string } }).__GEO_CONFIG__?.martinUrl ?? 'http://localhost:3000'
-  : 'http://localhost:3000';
+const MARTIN_URL = PUBLIC_MARTIN_URL || 'http://localhost:3000';
+const API_URL    = PUBLIC_API_URL    || 'http://localhost:8000';
 
 export const layers: LayerConfig[] = [
   // ─── Administrative boundaries (MVT from Martin / PostGIS) ───────────────

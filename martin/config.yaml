@@ -18,6 +18,13 @@
 keep_alive: 75
 worker_processes: 1
 
+# Allow browsers to request tiles from any origin (Vercel, localhost, etc.)
+# Without this the browser blocks cross-origin tile requests even though QGIS works fine.
+cors:
+  origin:
+    - '*'
+  max_age: 3600
+
 postgres:
   # search_path is set at the DATABASE level via ALTER DATABASE so it applies
   # to every connection including through Supabase's PgBouncer session pooler.
