@@ -18,5 +18,6 @@ export const GET: RequestHandler = () => {
     apiUrl: env.PUBLIC_API_URL ?? 'http://localhost:8000',
     martinUrl: env.PUBLIC_MARTIN_URL ?? 'http://localhost:3000',
     titilerUrl: env.PUBLIC_TITILER_URL ?? 'http://localhost:8080',
+    r2PublicUrl: env.PUBLIC_R2_URL ?? '',
   });
 };

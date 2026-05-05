@@ -366,6 +366,7 @@ class LayerTarget(BaseModel):
     source_layer: str
     target_table: str
     overwrite: bool = False
+    export_parquet: bool = False
 
     @field_validator("target_table")
     @classmethod
@@ -381,11 +382,93 @@ class ProcessRequest(BaseModel):
     layers: list[LayerTarget]  # one or more layers to import from the same file
 
 
-async def _run_batch(job_ids: list[str], upload_job_id: str) -> None:
-    """Run ogr2ogr for each layer sequentially, then clean up /tmp."""
-    for job_id in job_ids:
+async def _run_parquet_export(job_id: str) -> None:
+    """
+    Export the already-imported PostGIS table to GeoParquet and upload to R2.
+
+    Two-step: ogr2ogr reads from PostGIS → temp GeoJSON, then DuckDB converts to
+    Parquet.  Falls back cleanly (restores 'done' status) if anything goes wrong,
+    so a parquet failure never kills the parent import.
+    """
+    pool = await get_postgis_pool()
+    async with pool.acquire() as conn:
+        job = await conn.fetchrow("SELECT * FROM staging.ingest_jobs WHERE id = $1", job_id)
+    if not job or job["status"] != "done":
+        return
+
+    target_table = job["target_table"]
+    upload_dir_id = job["r2_key"].split("/")[0] if job["r2_key"] else job_id
+    tmp_dir = TMP_ROOT / upload_dir_id
+
+    safe_table = target_table.replace(".", "_")
+    geojson_path = tmp_dir / f"_{safe_table}_export.geojson"
+    parquet_path = tmp_dir / f"{safe_table}.parquet"
+    parts = target_table.split(".", 1)
+    parquet_key = f"{parts[0]}/{parts[1]}/{job_id[:8]}.parquet" if len(parts) == 2 else f"exports/{job_id[:8]}.parquet"
+
+    await _update_job(job_id, status="exporting_parquet")
+    loop = asyncio.get_running_loop()
+
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        # Step 1: dump PostGIS table → temp GeoJSON
+        cmd = [
+            _ogr2ogr_bin(),
+            "-f", "GeoJSON",
+            str(geojson_path),
+            f"PG:{_direct_url()}",
+            target_table,
+            "-t_srs", "EPSG:4326",
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"GeoJSON export failed: {out.decode(errors='replace')[:300]}")
+
+        # Step 2: GeoJSON → Parquet via DuckDB spatial
+        def _to_parquet() -> None:
+            import duckdb as _duckdb
+            c = _duckdb.connect(":memory:")
+            try:
+                c.execute("INSTALL spatial; LOAD spatial;")
+                c.execute(
+                    f"COPY (SELECT * FROM ST_READ('{geojson_path}')) "
+                    f"TO '{parquet_path}' (FORMAT PARQUET)"
+                )
+            finally:
+                c.close()
+
+        await loop.run_in_executor(None, _to_parquet)
+
+        # Step 3: upload to R2 geo-parquet bucket
+        if r2_client.r2_configured():
+            await r2_client.upload_file(parquet_path, parquet_key, settings.r2_parquet_bucket)
+            await _update_job(job_id, status="done", parquet_key=parquet_key)
+            log.info("Job %s: parquet → R2 %s/%s", job_id, settings.r2_parquet_bucket, parquet_key)
+        else:
+            await _update_job(job_id, status="done")
+            log.warning("Job %s: parquet done but R2 not configured — file not uploaded", job_id)
+
+    except Exception as exc:
+        log.error("Job %s: parquet export failed: %s", job_id, exc)
+        await _update_job(job_id, status="done")  # restore done; don't fail the import
+
+    finally:
+        geojson_path.unlink(missing_ok=True)
+        parquet_path.unlink(missing_ok=True)
+
+
+async def _run_batch(job_ids: list[str], upload_job_id: str, export_flags: list[bool]) -> None:
+    """Run ogr2ogr for each layer sequentially, optionally export parquet, then clean up /tmp."""
+    for i, job_id in enumerate(job_ids):
         await _run_ogr2ogr(job_id)
-    # All layers done — remove the shared /tmp upload directory
+        if i < len(export_flags) and export_flags[i]:
+            await _run_parquet_export(job_id)
     shutil.rmtree(TMP_ROOT / upload_job_id, ignore_errors=True)
     log.info("Batch complete: %d layers, cleaned up /tmp/%s", len(job_ids), upload_job_id)
 
@@ -448,7 +531,8 @@ async def process_job(req: ProcessRequest, background_tasks: BackgroundTasks):
                 )
         job_ids.append(layer_job_id)
 
-    background_tasks.add_task(_run_batch, job_ids, req.job_id)
+    export_flags = [layer.export_parquet for layer in req.layers]
+    background_tasks.add_task(_run_batch, job_ids, req.job_id, export_flags)
     return {"job_ids": job_ids, "count": len(job_ids)}
 
 
@@ -468,7 +552,7 @@ async def get_batch_status(ids: str):
         rows = await conn.fetch(
             """
             SELECT id, source_layer, target_table, status,
-                   pct_complete, rows_inserted, error_message
+                   pct_complete, rows_inserted, error_message, parquet_key
             FROM staging.ingest_jobs
             WHERE id = ANY($1::uuid[])
             ORDER BY created_at
@@ -484,6 +568,40 @@ async def get_batch_status(ids: str):
             "pct": r["pct_complete"],
             "rows_inserted": r["rows_inserted"],
             "error": r["error_message"],
+            "parquet_key": r["parquet_key"],
+        }
+        for r in rows
+    ]
+
+
+@router.get("/parquet")
+async def list_parquet_exports():
+    """
+    List GeoParquet files produced by completed ingest jobs.
+    Returns parquet_key (R2 object key) and a public URL when R2_PUBLIC_URL is configured.
+    """
+    pool = await get_postgis_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, source_layer, target_table, parquet_key,
+                   rows_inserted, created_at
+            FROM staging.ingest_jobs
+            WHERE parquet_key IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 100
+            """
+        )
+    r2_public = settings.r2_public_url.rstrip("/")
+    return [
+        {
+            "job_id": str(r["id"]),
+            "source_layer": r["source_layer"],
+            "target_table": r["target_table"],
+            "parquet_key": r["parquet_key"],
+            "parquet_url": f"{r2_public}/{r['parquet_key']}" if r2_public else None,
+            "rows": r["rows_inserted"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
         }
         for r in rows
     ]

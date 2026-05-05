@@ -20,6 +20,7 @@
     checked: boolean;
     targetTable: string;
     overwrite: boolean;
+    exportParquet: boolean;
   }
 
   interface BatchLayerStatus {
@@ -30,6 +31,7 @@
     pct: number;
     rows_inserted: number;
     error: string | null;
+    parquet_key: string | null;
   }
 
   interface JobRecord {
@@ -51,6 +53,7 @@
   let phase: Phase = 'idle';
   let dragging = false;
   let apiUrl = 'http://localhost:8000';
+  let r2PublicUrl = '';
 
   // Upload phase
   let uploadPct = 0;
@@ -76,6 +79,7 @@
   $: totalRowsInserted = batchProgress.reduce((sum, s) => sum + (s.rows_inserted ?? 0), 0);
   $: doneCount = batchProgress.filter(s => s.status === 'done').length;
   $: errorCount = batchProgress.filter(s => s.status === 'error').length;
+  $: firstParquetKey = batchProgress.find(s => s.parquet_key)?.parquet_key ?? null;
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
   onMount(async () => {
@@ -84,6 +88,7 @@
       if (r.ok) {
         const cfg = await r.json();
         apiUrl = cfg.apiUrl ?? apiUrl;
+        r2PublicUrl = cfg.r2PublicUrl ?? '';
       }
     } catch { /* fallback */ }
     loadJobs();
@@ -128,7 +133,7 @@
           const sels: Record<string, LayerSelection> = {};
           for (const layer of uploadResult.layers) {
             const safeName = layer.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 40);
-            sels[layer.name] = { checked: true, targetTable: `staging.${safeName}`, overwrite: false };
+            sels[layer.name] = { checked: true, targetTable: `staging.${safeName}`, overwrite: false, exportParquet: false };
           }
           layerSelections = sels;
           phase = 'ready';
@@ -184,6 +189,11 @@
     layerSelections = layerSelections;
   }
 
+  function toggleParquet(name: string) {
+    layerSelections[name] = { ...layerSelections[name], exportParquet: !layerSelections[name].exportParquet };
+    layerSelections = layerSelections;
+  }
+
   // ── Process ───────────────────────────────────────────────────────────────
   async function startProcessing() {
     if (!uploadResult || !canImport) return;
@@ -195,6 +205,7 @@
       source_layer: l.name,
       target_table: layerSelections[l.name].targetTable.trim(),
       overwrite: layerSelections[l.name].overwrite,
+      export_parquet: layerSelections[l.name].exportParquet,
     }));
 
     try {
@@ -223,6 +234,7 @@
         pct: 0,
         rows_inserted: 0,
         error: null,
+        parquet_key: null,
       }));
 
       pollTimer = setInterval(pollBatch, 2000);
@@ -283,7 +295,15 @@
   }
 
   function statusColour(s: string) {
-    return s === 'done' ? 'green' : s === 'error' ? 'red' : s === 'processing' ? 'blue' : 'grey';
+    if (s === 'done') return 'green';
+    if (s === 'error') return 'red';
+    if (s === 'processing' || s === 'exporting_parquet') return 'blue';
+    return 'grey';
+  }
+
+  function parquetUrl(key: string | null): string | null {
+    if (!key || !r2PublicUrl) return null;
+    return `${r2PublicUrl.replace(/\/$/, '')}/${key}`;
   }
 </script>
 
@@ -400,7 +420,7 @@
                     </div>
                   </div>
 
-                  <!-- Expanded: target table + overwrite (only when checked) -->
+                  <!-- Expanded: target table + overwrite + parquet (only when checked) -->
                   {#if layerSelections[layer.name]?.checked}
                     <div class="layer-config">
                       <input
@@ -417,6 +437,14 @@
                           on:change={() => toggleOverwrite(layer.name)}
                         />
                         <span>Overwrite</span>
+                      </label>
+                      <label class="checkbox-row compact parquet-toggle">
+                        <input
+                          type="checkbox"
+                          checked={layerSelections[layer.name].exportParquet}
+                          on:change={() => toggleParquet(layer.name)}
+                        />
+                        <span class="parquet-label">GeoParquet</span>
                       </label>
                     </div>
                   {/if}
@@ -465,6 +493,9 @@
                       <span class="dim">{row.rows_inserted.toLocaleString()} rows</span>
                     {/if}
                   {/if}
+                  {#if row.status === 'exporting_parquet'}
+                    <div class="spinner-row sm"><span class="spinner"></span> Exporting to GeoParquet…</div>
+                  {/if}
                   {#if row.status === 'queued'}
                     <div class="spinner-row sm"><span class="spinner"></span> Queued…</div>
                   {/if}
@@ -510,6 +541,20 @@
                 {#if row.error}
                   <p class="error-msg sm">{row.error}</p>
                 {/if}
+                {#if row.parquet_key}
+                  <div class="parquet-result">
+                    <span class="parquet-icon">▼</span>
+                    <div class="parquet-info">
+                      <span class="parquet-key-label">GeoParquet</span>
+                      <code class="parquet-key">{row.parquet_key}</code>
+                      {#if parquetUrl(row.parquet_key)}
+                        <a class="parquet-link" href={parquetUrl(row.parquet_key)} target="_blank" rel="noopener">
+                          Download
+                        </a>
+                      {/if}
+                    </div>
+                  </div>
+                {/if}
               </div>
             {/each}
           </div>
@@ -523,6 +568,11 @@
                   <code>ALTER TABLE staging.your_table SET SCHEMA geo;</code>
                 </li>
                 <li>Then redeploy Martin on Render (Manual Deploy).</li>
+                {#if firstParquetKey}
+                  <li>Query GeoParquet via DuckDB:
+                    <code>SELECT * FROM read_parquet('s3://geo-parquet/{firstParquetKey}');</code>
+                  </li>
+                {/if}
               </ul>
             </div>
           {/if}
@@ -919,6 +969,33 @@
   .job-table { font-size: 11px; color: #60a5fa; font-family: 'SF Mono', monospace; margin: 0; }
   .job-meta { display: flex; flex-wrap: wrap; gap: 8px; }
   .job-meta span { font-size: 11px; color: #475569; }
+
+  /* ── GeoParquet toggle ──────────────────────────────────────────────────── */
+  .parquet-toggle { color: #a78bfa; }
+  .parquet-label  { color: #a78bfa; }
+
+  /* ── GeoParquet result row ──────────────────────────────────────────────── */
+  .parquet-result {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 10px;
+    background: rgba(139,92,246,0.08);
+    border: 1px solid rgba(139,92,246,0.2);
+    border-radius: 6px;
+    margin-top: 2px;
+  }
+  .parquet-icon { font-size: 10px; color: #a78bfa; margin-top: 2px; flex-shrink: 0; }
+  .parquet-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+  .parquet-key-label { font-size: 10px; font-weight: 600; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em; }
+  .parquet-key { font-family: 'SF Mono', monospace; font-size: 11px; color: #c4b5fd; word-break: break-all; }
+  .parquet-link {
+    font-size: 11px;
+    color: #a78bfa;
+    text-decoration: none;
+    align-self: flex-start;
+  }
+  .parquet-link:hover { text-decoration: underline; }
 
   /* ── Shared utilities ───────────────────────────────────────────────────── */
   .dim   { font-size: 12px; color: #64748b; }
