@@ -106,7 +106,12 @@ async def get_features(
             detail=f"Query failed for layer '{layer}': {exc}",
         ) from exc
 
-    features = [json.loads(row["feature"]) for row in rows]
+    # asyncpg's JSONB codec returns dicts directly; json.loads only needed as fallback
+    # for connections without the codec (e.g. tests using a raw connection).
+    features = [
+        row["feature"] if isinstance(row["feature"], dict) else json.loads(row["feature"])
+        for row in rows
+    ]
 
     geojson = json.dumps({
         "type": "FeatureCollection",
