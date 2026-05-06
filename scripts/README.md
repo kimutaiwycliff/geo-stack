@@ -4,13 +4,106 @@ Data pipeline tools for geo-stack.
 
 | Script | Purpose | Requires |
 |--------|---------|----------|
-| `to_geoparquet.py` | Convert any vector format (SHP, GPKG, GeoJSON) → optimized GeoParquet | `pip install duckdb geopandas pyarrow` |
+| `to_geoparquet.py` | Convert any vector format (SHP, GPKG, GeoJSON) → optimized GeoParquet | Python venv + deps |
 | `to_pmtiles.sh` | GeoJSON/GeoParquet → PMTiles via tippecanoe | `tippecanoe`, `pmtiles`, `duckdb` CLI |
 | `load_postgis.sh` | Load GeoParquet/GeoJSON into PostGIS via ogr2ogr | `gdal`, running PostGIS |
-| `overture_extract.py` | Extract Overture Maps data for a bbox | `pip install duckdb` |
-| `optimize_parquet.py` | Hilbert sort + bbox columns on existing GeoParquet | `pip install duckdb geopandas pyarrow` |
+| `overture_extract.py` | Extract Overture Maps data for a bbox | Python venv + `duckdb` |
+| `optimize_parquet.py` | Hilbert sort + bbox columns on existing GeoParquet | Python venv + deps |
 | `r2_sync.sh` | Upload data/ to Cloudflare R2 | `awscli` |
 | `new_project.sh` | Bootstrap a new project workspace | nothing |
+
+---
+
+## Setup — install dependencies
+
+### Python virtual environment (all platforms)
+
+Modern Linux distros (Ubuntu 22.04+, Debian 12+) block system-wide `pip install`
+with "externally managed environment". Use a venv everywhere — it also keeps
+geo deps isolated from other projects.
+
+```bash
+# Create venv once (from the repo root)
+python3 -m venv .venv
+
+# Activate — do this every terminal session before running scripts
+source .venv/bin/activate          # macOS / Linux
+.venv\Scripts\activate             # Windows (PowerShell)
+
+# Install Python deps (inside activated venv)
+pip install duckdb geopandas pyarrow shapely
+```
+
+To deactivate when done: `deactivate`
+
+You can tell the venv is active because your prompt shows `(.venv)`.
+
+---
+
+### CLI tools — macOS
+
+```bash
+brew install tippecanoe
+brew install protomaps/homebrew-protomaps/go-pmtiles
+brew install duckdb
+brew install awscli
+```
+
+### CLI tools — Ubuntu / Debian (Linux)
+
+```bash
+# GDAL / ogr2ogr
+sudo apt update && sudo apt install -y gdal-bin
+
+# tippecanoe — build from source (no apt package)
+sudo apt install -y build-essential libsqlite3-dev zlib1g-dev
+git clone https://github.com/felt/tippecanoe.git
+cd tippecanoe && make -j$(nproc) && sudo make install && cd ..
+
+# pmtiles CLI — download binary from GitHub releases
+PMTILES_VERSION=$(curl -s https://api.github.com/repos/protomaps/go-pmtiles/releases/latest | grep tag_name | cut -d'"' -f4)
+curl -Lo pmtiles.tar.gz "https://github.com/protomaps/go-pmtiles/releases/download/${PMTILES_VERSION}/go-pmtiles_${PMTILES_VERSION}_Linux_x86_64.tar.gz"
+tar -xzf pmtiles.tar.gz pmtiles && sudo mv pmtiles /usr/local/bin/ && rm pmtiles.tar.gz
+
+# duckdb CLI
+curl -Lo duckdb.gz https://github.com/duckdb/duckdb/releases/latest/download/duckdb_cli-linux-amd64.gz
+gunzip duckdb.gz && chmod +x duckdb && sudo mv duckdb /usr/local/bin/
+
+# awscli
+sudo apt install -y awscli
+# or: pip install awscli  (inside venv)
+```
+
+### CLI tools — Windows (WSL2 recommended)
+
+Run everything inside WSL2 (Ubuntu). Once inside WSL, follow the Ubuntu steps above.
+
+```powershell
+# Install WSL2 with Ubuntu (PowerShell, run as Administrator)
+wsl --install
+```
+
+Then open the Ubuntu terminal and proceed with the Linux instructions.
+
+---
+
+### Credentials — `.env.local`
+
+Fill in your Cloudflare R2 values (get them from Cloudflare dashboard → R2 → Manage R2 API Tokens):
+
+```bash
+R2_ENDPOINT=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+R2_ACCESS_KEY=your_access_key_id
+R2_SECRET_KEY=your_secret_access_key
+R2_BUCKET_NAME=geo-data
+R2_PUBLIC_URL=https://pub-xxxx.r2.dev   # your public bucket URL
+```
+
+Load before running sync commands:
+
+```bash
+source .env.local       # macOS / Linux / WSL
+```
 
 ## Quick workflow: from raw data to map
 
