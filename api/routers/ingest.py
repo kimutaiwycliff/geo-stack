@@ -211,7 +211,7 @@ async def _run_ogr2ogr(job_id: str) -> None:
         return
 
     # Find the layer the user selected
-    detected = json.loads(job["detected_layers"] or "[]")
+    detected = job["detected_layers"] or []
     source_layer_name = job["source_layer"]
     if source_layer_name:
         layer_info = next(

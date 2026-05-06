@@ -6,6 +6,7 @@ A custom geometry codec converts PostGIS WKB hex strings to raw bytes
 so geometry values pass through transparently to the API layer.
 """
 
+import json
 import logging
 
 import asyncpg
@@ -37,6 +38,13 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
         schema=schema,
         format="text",
     )
+    for pg_type in ("json", "jsonb"):
+        await conn.set_type_codec(
+            pg_type,
+            encoder=json.dumps,
+            decoder=json.loads,
+            schema="pg_catalog",
+        )
 
 
 async def init_postgis_pool() -> None:
