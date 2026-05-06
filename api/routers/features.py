@@ -18,6 +18,7 @@ ALLOWED_LAYERS: dict[str, tuple[str, str]] = {
     "parcels":            ("geo", "parcels"),
     "boundaries":         ("geo", "boundaries"),
     "points_of_interest": ("geo", "points_of_interest"),
+    "administration":     ("geo", "adm_adm_1"),
 }
 
 
