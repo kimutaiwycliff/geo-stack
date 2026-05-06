@@ -423,10 +423,10 @@ async def _run_parquet_export(job_id: str) -> None:
     table_name  = parts[1] if len(parts) == 2 else target_table
     parquet_key = f"{schema_name}/{table_name}/{job_id[:8]}.parquet"
 
-    await _update_job(job_id, status="exporting_parquet")
     loop = asyncio.get_running_loop()
 
     try:
+        await _update_job(job_id, status="exporting_parquet")
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         # Step 1: dump PostGIS table → GeoJSON via asyncpg + ST_AsGeoJSON
