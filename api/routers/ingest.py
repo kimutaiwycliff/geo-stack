@@ -392,6 +392,19 @@ async def _run_parquet_export(job_id: str) -> None:
     Falls back cleanly (restores 'done' status, stores error in parquet_error)
     so a parquet failure never kills the parent import.
     """
+    # Fail fast — no point running the export if we can't upload the result
+    if not r2_client.r2_configured():
+        pool = await get_postgis_pool()
+        async with pool.acquire() as conn:
+            job = await conn.fetchrow("SELECT id FROM staging.ingest_jobs WHERE id = $1", job_id)
+        if job:
+            await _update_job(
+                job_id, status="done",
+                parquet_error="R2 not configured on Render. Add R2_ENDPOINT, R2_ACCESS_KEY, R2_SECRET_KEY to geo-api environment variables.",
+            )
+        log.warning("Job %s: GeoParquet export skipped — R2 not configured", job_id)
+        return
+
     pool = await get_postgis_pool()
     async with pool.acquire() as conn:
         job = await conn.fetchrow("SELECT * FROM staging.ingest_jobs WHERE id = $1", job_id)
@@ -457,7 +470,7 @@ async def _run_parquet_export(job_id: str) -> None:
             import duckdb as _duckdb
             c = _duckdb.connect(":memory:")
             try:
-                c.execute("INSTALL spatial; LOAD spatial;")
+                c.execute("LOAD spatial;")  # extension is pre-installed in the Docker image
                 c.execute(
                     f"COPY (SELECT * FROM ST_READ('{geojson_path}')) "
                     f"TO '{parquet_path}' (FORMAT PARQUET)"
@@ -470,7 +483,7 @@ async def _run_parquet_export(job_id: str) -> None:
         # Step 3: upload to R2 geo-parquet bucket
         if r2_client.r2_configured():
             await r2_client.upload_file(parquet_path, parquet_key, settings.r2_parquet_bucket)
-            await _update_job(job_id, status="done", parquet_key=parquet_key)
+            await _update_job(job_id, status="done", parquet_key=parquet_key, parquet_error=None)
             log.info("Job %s: parquet → R2 %s/%s", job_id, settings.r2_parquet_bucket, parquet_key)
         else:
             await _update_job(job_id, status="done")
