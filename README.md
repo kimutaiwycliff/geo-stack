@@ -6,6 +6,26 @@ from national land administration platforms to climate risk dashboards.
 One codebase. Three deployment modes. Switch between them by changing only env vars
 and which Docker Compose override file you use — no code changes.
 
+**Live demo:** https://geo-stackk.vercel.app
+
+![geo-stack frontend](docs/screenshot.png)
+
+## Architecture
+
+```mermaid
+flowchart LR
+    U[Browser<br/>SvelteKit + MapLibre] --> C[Caddy]
+    C --> API[FastAPI<br/>GeoJSON · STAC · ingest]
+    C --> M[Martin<br/>MVT tiles]
+    C --> T[TiTiler<br/>COG rasters]
+    API --> PG[(PostGIS)]
+    M --> PG
+    API --> D[DuckDB]
+    D --> GP[(GeoParquet<br/>disk / R2)]
+    T --> COG[(COGs<br/>disk / R2)]
+    U -. static .-> PM[(PMTiles on R2)]
+```
+
 ---
 
 ## Stack
